@@ -60,16 +60,14 @@ local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MoveEditorTypes = require(ReplicatedStorage.Shared.Authoring.MoveEditorTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
-local AdminGate = require(script.Parent.Parent.Network.AdminGate)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 local AttackCatalog = require(script.Parent.Parent.Combat.AttackCatalog)
 local AttackRequestSystem = require(script.Parent.Parent.Combat.Attack.AttackRequestSystem)
+local MoveContent = require(script.Parent.Parent.Combat.MoveContent)
 local AuthoredMoveLibrary = require(script.Parent.Parent.Combat.AuthoredMoveLibrary)
 local DefaultMoveRegistry = require(script.Parent.Parent.Combat.DefaultMoveRegistry)
 local MoveRegistryManager = require(script.Parent.Parent.Combat.MoveRegistryManager)
@@ -93,8 +91,9 @@ local logger = Logger.scope("MoveEditorSystem")
 local Config = Constants.MoveEditor
 
 local rateLimiter = RateLimiter.New(Config.MaxCallsPerSecond)
-
-local wrapHandler = RemoteHandler.Scoped(logger, { Success = false, Reason = "InternalError" })
+-- SetEditorOpen's own bucket, so a close is never starved by the Function traffic above (see handleSetEditorOpen). Its ceiling
+-- only exists because every public remote has one; an open still also draws on `rateLimiter`, as it always did.
+local editorOpenRateLimiter = RateLimiter.New(Config.MaxCallsPerSecond)
 local withRetry = DataStoreRetry.Scoped(logger, Constants.Storage.RetryPolicy)
 
 -- Obtained in Init, never at require time, so requiring this module has no side effects.
@@ -128,13 +127,8 @@ local savedMoves: { [string]: MoveDefinition } = {}
 -- A move is Default when the Default registry knows the id and no custom move has taken it over -- the
 -- same precedence AttackCatalog resolves with, so the editor edits the move combat would actually throw.
 local function sourceOf(moveId: string): MoveSource?
-	if MoveRegistryManager.Get(moveId) then
-		return "Custom"
-	end
-	if DefaultMoveRegistry.Get(moveId) then
-		return "Default"
-	end
-	return nil
+	local _, layer = MoveContent.Resolve(moveId)
+	return layer :: MoveSource?
 end
 
 local function liveMove(moveId: string, source: MoveSource): MoveDefinition?
@@ -214,45 +208,38 @@ function MoveEditorSystem.DescribeMove(
 
 	local projectile = move.Projectile
 	if projectile then
-		local shots = ProjectileTypes.ShotCount(projectile)
+		local budget = ProjectileTypes.Budget(projectile)
+		local shots = budget.ShotsPerWave
+		local waves = if budget.Waves > 1
+			then string.format(" in each of %d waves over %.2fs", budget.Waves, budget.CastSeconds)
+			else ""
 		table.insert(
 			notes,
 			string.format(
-				"Projectile: %d shot%s launch when the active window opens, and fly up to %.0f studs or %.2fs.",
+				"Projectile: %d shot%s launch%s when the active window opens, and fly up to %.0f studs or %.2fs.",
 				shots,
 				if shots == 1 then "" else "s",
+				waves,
 				math.min(projectile.MaxRange, projectile.Speed * projectile.LifetimeSeconds),
 				projectile.LifetimeSeconds
 			)
 		)
-		if projectile.SpreadPattern == "Single" and projectile.Count > 1 then
-			table.insert(notes, "Single fires one shot: Count only applies to the other spread patterns.")
+		if budget.Shots > budget.ShotsPerWave * budget.Waves then
+			table.insert(notes, `With every split, one cast can put up to {budget.Shots} shots in the air.`)
 		end
-		if projectile.Homing and projectile.HomingStrength <= 0 then
-			table.insert(notes, "Homing is on with zero strength, so no shot ever turns.")
-		end
-		if projectile.SpawnDirection == "Target" or projectile.Homing then
-			if projectile.HomingRange <= 0 or projectile.HomingMaxAngle <= 0 then
-				table.insert(notes, "Target range or angle is zero, so no target can ever be picked.")
-			end
-		end
-		if projectile.ParryResponse == "ExistingParry" and projectile.ParryBehavior ~= "CannotParry" then
-			table.insert(
-				notes,
-				"A parried shot staggers its thrower wherever they are, exactly as a parried swing does."
-			)
-		end
-		if projectile.MaxRange > projectile.Speed * projectile.LifetimeSeconds + 1e-3 then
+		-- The waves still to fire when the swing returns to idle keep firing unless it was interrupted
+		-- (ProjectileTypes' header, Waves) -- worth knowing when the train outlasts the recovery.
+		if effective and budget.CastSeconds > effective.ActiveSeconds + effective.RecoverySeconds + 1e-3 then
 			table.insert(
 				notes,
 				string.format(
-					"Its lifetime runs out first: at %.0f studs/s a %.2fs shot only reaches %.0f of its %.0f-stud range.",
-					projectile.Speed,
-					projectile.LifetimeSeconds,
-					projectile.Speed * projectile.LifetimeSeconds,
-					projectile.MaxRange
+					"The waves outlast the swing by %.2fs: the thrower can act again while the last ones fire.",
+					budget.CastSeconds - effective.ActiveSeconds - effective.RecoverySeconds
 				)
 			)
+		end
+		for _, warning in ProjectileTypes.Warnings(projectile) do
+			table.insert(notes, warning)
 		end
 	end
 
@@ -641,33 +628,23 @@ end
 
 -- Handlers -----------------------------------------------------------------------------------------------
 
-local function gate(player: Player, actionName: string): (boolean, string?)
-	return AdminGate.Check(player, actionName, rateLimiter)
-end
+-- Every Function handler below is reached only through an admin Endpoint (see Init): AdminGate's auth, then this System's rate
+-- limit, then the pcall that answers InternalError. A refusal answers { Success = false, Reason = "NotAuthorized" | "RateLimited" }.
 
-local function handleOpen(player: Player): MoveEditorTypes.OpenResult
-	local allowed, reason = gate(player, "Open")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleOpen(_player: Player): MoveEditorTypes.OpenResult
+	-- Each id once, from the layer that wins it (a Default id a custom move has taken over is the custom move's). Default
+	-- entries first, then custom, the order the panel has always received.
 	local entries: { MoveEntry } = {}
-	for _, move in DefaultMoveRegistry.List() do
-		-- A Default id a custom move has taken over is that custom move's, listed below instead.
-		if MoveRegistryManager.Get(move.MoveId) == nil then
-			table.insert(entries, buildEntry(move, "Default"))
-		end
+	local customs: { MoveEntry } = {}
+	for _, entry in MoveContent.ListWithLayer() do
+		local source = entry.Layer :: MoveSource
+		table.insert(if source == "Default" then entries else customs, buildEntry(entry.Item, source))
 	end
-	for _, move in MoveRegistryManager.List() do
-		table.insert(entries, buildEntry(move, "Custom"))
-	end
+	table.move(customs, 1, #customs, #entries + 1, entries)
 	return { Success = true, Entries = entries }
 end
 
 local function handlePreview(player: Player, rawDraft: unknown): MoveEditorTypes.EntryResult
-	local allowed, reason = gate(player, "Preview")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	local move, source, applyReason = applyDraft(player, rawDraft)
 	if not move or not source then
 		return { Success = false, Reason = applyReason }
@@ -719,10 +696,6 @@ local function persist(player: Player, move: MoveDefinition, source: MoveSource)
 end
 
 local function handleSave(player: Player, rawDraft: unknown): MoveEditorTypes.EntryResult
-	local allowed, reason = gate(player, "Save")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	local move, source, applyReason = applyDraft(player, rawDraft)
 	if not move or not source then
 		return { Success = false, Reason = applyReason }
@@ -734,11 +707,7 @@ local function handleSave(player: Player, rawDraft: unknown): MoveEditorTypes.En
 	return { Success = true, Entry = entryFor(move.MoveId) }
 end
 
-local function handleHistory(player: Player, rawMoveId: unknown): MoveEditorTypes.HistoryResult
-	local allowed, reason = gate(player, "History")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleHistory(_player: Player, rawMoveId: unknown): MoveEditorTypes.HistoryResult
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
@@ -774,10 +743,6 @@ local function handleRestoreVersion(
 	rawMoveId: unknown,
 	rawVersion: unknown
 ): MoveEditorTypes.EntryResult
-	local allowed, reason = gate(player, "RestoreVersion")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
@@ -825,11 +790,7 @@ end
 -- The remotes exist in every build (BootManifest checks every declared name is created) and refuse
 -- NotStudio outside Studio. The write needs Game Settings > Security > Allow HTTP Requests.
 
-local function studioGate(player: Player, actionName: string, rawMoveId: unknown): (string?, MoveSource?, string?)
-	local allowed, reason = gate(player, actionName)
-	if not allowed then
-		return nil, nil, reason
-	end
+local function studioGate(_player: Player, _actionName: string, rawMoveId: unknown): (string?, MoveSource?, string?)
 	if not RunService:IsStudio() then
 		return nil, nil, "NotStudio"
 	end
@@ -1041,20 +1002,22 @@ type Target = { Move: MoveDefinition, Source: MoveSource }
 -- Every live move in `group` -- and, for a Default group, of `stage` when one is given -- by the same
 -- classification the browser files them under (groupOf).
 local function bulkTargets(group: string, stage: string?): { Target }
+	-- Default targets first, then custom, as before; a Default id a custom move has taken over is the custom move's.
 	local targets: { Target } = {}
-	for _, move in DefaultMoveRegistry.List() do
-		if MoveRegistryManager.Get(move.MoveId) ~= nil or groupOf(move, "Default") ~= group then
+	local customs: { Target } = {}
+	for _, entry in MoveContent.ListWithLayer() do
+		local move = entry.Item
+		local source = entry.Layer :: MoveSource
+		if groupOf(move, source) ~= group then
 			continue
 		end
-		if stage == nil or DefaultMoveRegistry.StageOf(move.MoveId) == stage then
+		if source == "Custom" then
+			table.insert(customs, { Move = move, Source = "Custom" })
+		elseif stage == nil or DefaultMoveRegistry.StageOf(move.MoveId) == stage then
 			table.insert(targets, { Move = move, Source = "Default" })
 		end
 	end
-	for _, move in MoveRegistryManager.List() do
-		if groupOf(move, "Custom") == group then
-			table.insert(targets, { Move = move, Source = "Custom" })
-		end
-	end
+	table.move(customs, 1, #customs, #targets + 1, targets)
 	return targets
 end
 
@@ -1062,10 +1025,6 @@ end
 -- save is skipped and counted, never fatal to the rest: the answer carries every move that DID change,
 -- plus the first reason one did not.
 local function handleBulkScale(player: Player, rawRequest: unknown): MoveEditorTypes.BulkScaleResult
-	local allowed, reason = gate(player, "BulkScale")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	local request = readBulkRequest(rawRequest)
 	if not request then
 		return { Success = false, Reason = "InvalidRequest" }
@@ -1111,11 +1070,7 @@ end
 
 -- Puts the live move back to its persisted state. A custom move that was never saved has no persisted
 -- state and stops existing -- the Entry comes back nil, which is the client's cue to drop it.
-local function handleRevert(player: Player, rawMoveId: unknown): MoveEditorTypes.EntryResult
-	local allowed, reason = gate(player, "Revert")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleRevert(_player: Player, rawMoveId: unknown): MoveEditorTypes.EntryResult
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
@@ -1141,10 +1096,6 @@ local function handleRevert(player: Player, rawMoveId: unknown): MoveEditorTypes
 end
 
 local function handleDelete(player: Player, rawMoveId: unknown): MoveEditorTypes.ActionResult
-	local allowed, reason = gate(player, "Delete")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
@@ -1176,10 +1127,6 @@ local function handleDelete(player: Player, rawMoveId: unknown): MoveEditorTypes
 end
 
 local function handleResetDefault(player: Player, rawMoveId: unknown): MoveEditorTypes.EntryResult
-	local allowed, reason = gate(player, "ResetDefault")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
@@ -1202,10 +1149,6 @@ local function handleResetDefault(player: Player, rawMoveId: unknown): MoveEdito
 end
 
 local function handleTestFire(player: Player, rawMoveId: unknown): MoveEditorTypes.ActionResult
-	local allowed, reason = gate(player, "TestFire")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawMoveId) ~= "string" then
 		return { Success = false, Reason = "InvalidMoveId" }
 	end
@@ -1223,10 +1166,6 @@ end
 -- Binding a slot IS equipping an art (ArtSystem owns every slot); DevGrantAndEquip is the one unlock
 -- bypass, so an admin can put a form they authored ten seconds ago under a key.
 local function handleEquipArtSlot(player: Player, rawSlot: unknown, rawArtId: unknown): MoveEditorTypes.ActionResult
-	local allowed, reason = gate(player, "EquipArtSlot")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawSlot) ~= "number" then
 		return { Success = false, Reason = "InvalidSlot" }
 	end
@@ -1241,10 +1180,10 @@ local function handleEquipArtSlot(player: Player, rawSlot: unknown, rawArtId: un
 end
 
 -- Freezes the admin while the editor is open, through AdminActionSystem.SetFrozen so its own bookkeeping
--- stays authoritative. The CLOSE is exempt from the rate limit: a throttled close would leave the admin
--- frozen with the panel already gone and nothing on screen to press again.
+-- stays authoritative. The CLOSE is exempt from the shared rate limit (it draws only on editorOpenRateLimiter, which nothing
+-- else spends): a throttled close would leave the admin frozen with the panel already gone and nothing on screen to press again.
 local function handleSetEditorOpen(player: Player, rawIsOpen: unknown): ()
-	if not AdminGate.IsAuthorized(player) or typeof(rawIsOpen) ~= "boolean" then
+	if typeof(rawIsOpen) ~= "boolean" then
 		return
 	end
 	if rawIsOpen and rateLimiter:IsLimited(player) then
@@ -1360,43 +1299,41 @@ function MoveEditorSystem.Init(): ()
 	task.spawn(loadDefaultMoveOverrides, dataStore)
 
 	local names = Config.RemoteNames
-	NetworkBridge.CreateRemoteFunction(names.Open).OnServerInvoke = wrapHandler("Open", handleOpen)
-	NetworkBridge.CreateRemoteFunction(names.Preview).OnServerInvoke = wrapHandler("Preview", handlePreview)
-	NetworkBridge.CreateRemoteFunction(names.Save).OnServerInvoke = wrapHandler("Save", handleSave)
-	NetworkBridge.CreateRemoteFunction(names.Revert).OnServerInvoke = wrapHandler("Revert", handleRevert)
-	NetworkBridge.CreateRemoteFunction(names.Delete).OnServerInvoke = wrapHandler("Delete", handleDelete)
-	NetworkBridge.CreateRemoteFunction(names.ResetDefault).OnServerInvoke =
-		wrapHandler("ResetDefault", handleResetDefault)
-	NetworkBridge.CreateRemoteFunction(names.TestFire).OnServerInvoke = wrapHandler("TestFire", handleTestFire)
-	NetworkBridge.CreateRemoteFunction(names.EquipArtSlot).OnServerInvoke =
-		wrapHandler("EquipArtSlot", handleEquipArtSlot)
-	NetworkBridge.CreateRemoteFunction(names.BulkScale).OnServerInvoke = wrapHandler("BulkScale", handleBulkScale)
-	NetworkBridge.CreateRemoteFunction(names.History).OnServerInvoke = wrapHandler("History", handleHistory)
-	NetworkBridge.CreateRemoteFunction(names.RestoreVersion).OnServerInvoke =
-		wrapHandler("RestoreVersion", handleRestoreVersion)
-	NetworkBridge.CreateRemoteFunction(names.WriteToSource).OnServerInvoke =
-		wrapHandler("WriteToSource", handleWriteToSource)
-	NetworkBridge.CreateRemoteFunction(names.RemoveFromSource).OnServerInvoke =
-		wrapHandler("RemoveFromSource", handleRemoveFromSource)
-	NetworkBridge.CreateRemoteFunction(names.ExportSource).OnServerInvoke =
-		wrapHandler("ExportSource", handleExportSource)
+	local endpoint = Endpoint.Scope("MoveEditorSystem", logger)
+	local handlers: { [string]: (Player, ...any) -> any } = {
+		Open = handleOpen,
+		Preview = handlePreview,
+		Save = handleSave,
+		Revert = handleRevert,
+		Delete = handleDelete,
+		ResetDefault = handleResetDefault,
+		TestFire = handleTestFire,
+		EquipArtSlot = handleEquipArtSlot,
+		BulkScale = handleBulkScale,
+		History = handleHistory,
+		RestoreVersion = handleRestoreVersion,
+		WriteToSource = handleWriteToSource,
+		RemoveFromSource = handleRemoveFromSource,
+		ExportSource = handleExportSource,
+	}
+	for key, handler in handlers do
+		endpoint.Function({
+			Name = names[key],
+			Limiter = rateLimiter,
+			Admin = true,
+			ErrorResult = { Success = false, Reason = "InternalError" },
+			Denied = function(reason: string): any
+				return { Success = false, Reason = reason }
+			end,
+			Handler = handler,
+		})
+	end
 
-	NetworkBridge.CreateRemoteEvent(names.SetEditorOpen).OnServerEvent
-		:Connect(function(player: Player, rawIsOpen: unknown)
-			local ok, errorMessage = pcall(handleSetEditorOpen, player, rawIsOpen)
-			if not ok then
-				logger:error(
-					"SetEditorOpen handler errored",
-					{ player = player.Name, errorMessage = tostring(errorMessage) }
-				)
-			end
-		end)
-
-	PlayerLifecycle.BindAllPlayers({
-		Scope = "MoveEditorSystem",
-		OnPlayerRemoving = function(player: Player)
-			rateLimiter:Clear(player)
-		end,
+	endpoint.Event({
+		Name = names.SetEditorOpen,
+		Limiter = editorOpenRateLimiter,
+		Admin = true,
+		Handler = handleSetEditorOpen,
 	})
 
 	logger:info("MoveEditorSystem.Init() complete")

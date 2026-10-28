@@ -24,8 +24,14 @@
 	    one stun, so an M1 string that landed its first hit whiffed its second -- the "chains stop in the
 	    middle" report. Same input-hold binding as the freeze; the freeze wins while both are live.
 
-	Both throttle rapid repeats on their own independent clock (see makeThrottledFreeze), so landings
-	or hits close in time can't stack into unintended slow motion.
+	The flight freeze throttles rapid repeats on its own clock (makeThrottledFreeze). The two combat freezes
+	are CHAINED instead (2026-10-27, FXConstants.HitStop's chain rules): overlapping freezes merge into one
+	hold capped at MaxChainSeconds, a freeze that would not extend the hold is dropped, and a finished chain
+	leaves ChainGapSeconds of free motion before the next. A server verdict's freeze is also AGED by its
+	trip (AgedSeconds), so latency is not stacked on top of the beat. Before this, hits arriving faster than
+	the freezes ran out kept both bodies stopped for as long as they kept coming -- the "I am stuck though
+	the hit-stop should be over" report -- and a knockback waited out a table's freeze length even when no
+	freeze had started; a launch now waits out VictimFreezeRemaining, the freeze that actually runs.
 
 	WHY BOTH HALVES NOW, and what was wrong with movement alone (2026-09-28). This module used to freeze
 	only the victim's velocity, on the reasoning that no swing animation played -- which stopped being
@@ -81,6 +87,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
 local FlightAnimator = require(script.Parent.FlightAnimator)
 local ParkourMotor = require(script.Parent.Parent.Parkour.ParkourMotor)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("HitStop")
 
@@ -114,12 +121,70 @@ function HitStop.FreezeFlightLanding(isHard: boolean): ()
 	freezeFlight(if isHard then CONFIG.FlightLandingHardSeconds else CONFIG.FlightLandingSoftSeconds)
 end
 
+-- Smoothness rules (2026-10-27) ----------------------------------------------------------------------
+--
+-- FXConstants.HitStop's CHAIN RULES and LATENCY AGING headers say why. Both are pure here so a spec pins the
+-- arithmetic with no rig; the two freeze families below each keep their own chain state and ask these.
+
+-- How long a freeze of `seconds` arriving `ageSeconds` after its contact should still hold. A verdict that
+-- arrived late keeps a stinger (MinStingerSeconds, or the beat itself if shorter) rather than vanishing.
+function HitStop.AgedSeconds(seconds: number, ageSeconds: number?): number
+	local age = if CONFIG.AgeByLatency and typeof(ageSeconds) == "number" and ageSeconds > 0 then ageSeconds else 0
+	if age <= 0 then
+		return seconds
+	end
+	return math.max(seconds - age, math.min(seconds, CONFIG.MinStingerSeconds))
+end
+
+-- How long a freeze wanting `seconds` from `now` may hold, given the chain it lands in: the chain began at
+-- `chainStartedAt` and is held until `heldUntil` (a past `heldUntil` is an idle chain). 0 means "start
+-- nothing": the chain's budget is spent, the freeze would not extend the hold, it falls inside the gap after a
+-- chain, or it is too short to read.
+function HitStop.ChainedSeconds(seconds: number, now: number, chainStartedAt: number, heldUntil: number): number
+	if seconds <= 0 then
+		return 0
+	end
+	if now >= heldUntil then
+		if now < heldUntil + CONFIG.ChainGapSeconds then
+			return 0
+		end
+		local fresh = math.min(seconds, CONFIG.MaxChainSeconds)
+		return if fresh >= CONFIG.MinFreezeSeconds then fresh else 0
+	end
+	local wantedEnd = math.min(now + seconds, chainStartedAt + CONFIG.MaxChainSeconds)
+	if wantedEnd <= heldUntil then
+		return 0
+	end
+	return wantedEnd - now
+end
+
+-- One freeze family's chain: when it began and until when it holds.
+type Chain = { StartedAt: number, HeldUntil: number }
+
+local function newChain(): Chain
+	-- Far enough in the past that the first freeze is never inside a gap.
+	return { StartedAt = -math.huge, HeldUntil = -math.huge }
+end
+
+-- Admits a freeze into `chain` and records it. Returns the seconds to hold (0: start nothing).
+local function admit(chain: Chain, seconds: number, now: number): number
+	local granted = HitStop.ChainedSeconds(seconds, now, chain.StartedAt, chain.HeldUntil)
+	if granted <= 0 then
+		return 0
+	end
+	if now >= chain.HeldUntil then
+		chain.StartedAt = now
+	end
+	chain.HeldUntil = now + granted
+	return granted
+end
+
 -- Exchange (animation) freeze ----------------------------------------------------------------------
 
 -- One guard for every combat freeze, separate from the flight freeze's own -- see
 -- AnimationTrackUtil.NewFreezeGuard's header on why families must not share one.
 local exchangeGuard = AnimationTrackUtil.NewFreezeGuard()
-local lastExchangeClock = 0
+local exchangeChain = newChain()
 
 -- The priorities a hit-stop freezes: the swing, the guard, the parry -- the clips that ARE the
 -- exchange. Idle/Movement/Core (walking, running, the armed idle) are deliberately absent.
@@ -151,23 +216,20 @@ end
 
 -- Freezes every playing Action-priority track on both combatants for `seconds`. Runs on every client that hears the
 -- hit, and freezes the OTHER body locally too, so both participants see one shared stop rather than
--- each only their own half. Throttled like the other freezes, so a fast multi-hit string reads as a
--- series of stingers, not one long slow-motion hold.
+-- each only their own half. Chained (FXConstants.HitStop's CHAIN RULES), so a fast multi-hit string reads as
+-- a series of stingers with free motion between them, never one long slow-motion hold. `ageSeconds` is how
+-- long ago the contact happened (a server verdict's trip); nil for a predicted impact.
 --
 -- TWO ROUTES, because two kinds of track exist. A track an AnimationManager owns (the local player's swing and
 -- guard) is frozen THROUGH its manager (AnimationManager.FreezeFor): a raw AdjustSpeed(0) on one is undone by the
 -- manager's stranded-speed repair on the next frame, which made the attacker's hit-stop one frame long. Every
 -- other track (a remote rig's replicated clips) is frozen directly by the generation-guarded guard below.
 -- Returns whether a freeze was started (false when throttled or empty).
-function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: number): boolean
+function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: number, ageSeconds: number?): boolean
+	seconds = admit(exchangeChain, HitStop.AgedSeconds(seconds, ageSeconds), os.clock())
 	if seconds <= 0 then
 		return false
 	end
-	local now = os.clock()
-	if now - lastExchangeClock < CONFIG.MinIntervalSeconds then
-		return false
-	end
-	lastExchangeClock = now
 
 	local catchUp = CONFIG.CatchUpSpeedMultiplier
 	local owned: { [AnimationTrack]: boolean } = {}
@@ -193,16 +255,23 @@ function HitStop.FreezeExchange(attacker: Model?, defender: Model?, seconds: num
 end
 
 -- Ends the exchange freeze now on both bodies -- a predicted impact the server then reversed (a block, a
--- parry, an evade), whose hold would otherwise run on over a hit that did not happen. The throttle is reset so
--- the verdict's own beat (a parry's clash) is not refused as a repeat.
+-- parry, an evade), whose hold would otherwise run on over a hit that did not happen. The chain is reset so
+-- the verdict's own beat (a parry's clash) is neither refused as a repeat nor held off by the gap.
 function HitStop.EndExchange(attacker: Model?, defender: Model?): ()
-	lastExchangeClock = 0
+	exchangeChain = newChain()
 	for _, model in { attacker, defender } do
 		if model then
 			AnimationManager.ThawFor(model)
 		end
 	end
 	exchangeGuard:Release()
+end
+
+-- How much of the exchange freeze is still to hold, 0 when none is. What a push waiting out the freeze reads,
+-- so it starts when the freeze that ACTUALLY ran ends -- not after a table's length for one that was dropped,
+-- shortened or aged.
+function HitStop.ExchangeRemaining(): number
+	return math.max(exchangeChain.HeldUntil - os.clock(), 0)
 end
 
 -- Victim movement freeze -----------------------------------------------------------------------------
@@ -217,7 +286,7 @@ local inputHoldBound = false
 -- After Roblox's own ControlModule, which calls Humanoid:Move on Enum.RenderPriority.Input -- so this
 -- frame's move vector is the one written here, not the player's.
 local INPUT_HOLD_BINDING = "CombatHitStopInputHold"
-local INPUT_HOLD_PRIORITY = Enum.RenderPriority.Input.Value + 1
+local INPUT_HOLD_PRIORITY = FrameOrder.Priority("HitStopInputHold")
 
 local function localRig(): (Humanoid?, BasePart?)
 	local character = Players.LocalPlayer.Character
@@ -249,6 +318,20 @@ end
 -- The stun slow (SlowVictimMovement): until when, and to what fraction of the player's own input.
 local victimSlowUntil: number? = nil
 local victimSlowMultiplier = 1
+
+-- The fraction of input a slow of `multiplier` lets through at `now`: the multiplier itself, easing linearly
+-- back to 1 across the last SlowReleaseSeconds before `untilAt` (FXConstants.HitStop.SlowReleaseSeconds).
+function HitStop.SlowMultiplierAt(multiplier: number, untilAt: number?, now: number): number
+	local release = CONFIG.SlowReleaseSeconds
+	if untilAt == nil or release <= 0 then
+		return multiplier
+	end
+	local remaining = untilAt - now
+	if remaining >= release then
+		return multiplier
+	end
+	return multiplier + (1 - multiplier) * math.clamp(1 - remaining / release, 0, 1)
+end
 
 local function slowActive(now: number): boolean
 	local until_ = victimSlowUntil
@@ -289,7 +372,10 @@ local function onInputHold(): ()
 	end
 	local direction = humanoid.MoveDirection
 	if direction.Magnitude > 1e-3 then
-		humanoid:Move(direction.Unit * victimSlowMultiplier, false)
+		humanoid:Move(
+			direction.Unit * HitStop.SlowMultiplierAt(victimSlowMultiplier, victimSlowUntil, os.clock()),
+			false
+		)
 	end
 	-- No jumping out of a stun either: a hop carries the body out of the next swing just as a walk did.
 	humanoid.Jump = false
@@ -317,26 +403,34 @@ local function onVictimFreezeHeartbeat(): ()
 	ParkourMotor.ApplyExternalImpulse(Vector3.new(0, vertical, 0))
 end
 
--- Starts (or extends) the hold.
-local function freezeVictimMovement(seconds: number): ()
-	if seconds <= 0 then
-		return
-	end
-	victimFreezeUntil = os.clock() + seconds
-	if not victimFreezeConnection then
-		victimFreezeConnection = RunService.Heartbeat:Connect(onVictimFreezeHeartbeat)
-	end
-	bindInputHold()
-end
-
-local freezeVictim = makeThrottledFreeze(freezeVictimMovement, "Combat victim hit-stop")
+-- The victim freeze's own chain -- separate from the exchange's, since the two start on different events (a
+-- predicted impact freezes the exchange, never this body's movement).
+local victimChain = newChain()
 
 -- Stops the LOCAL player's own body where it stands for `seconds` -- see this file's header for both
--- halves and why the input half is what makes it work on a runner. Throttled the same as the flight
--- freeze. Caller supplies the duration: this module owns HOW to freeze, not which outcome deserves how
--- long.
-function HitStop.FreezeVictimMovement(seconds: number): ()
-	freezeVictim(seconds)
+-- halves and why the input half is what makes it work on a runner. Chained and aged like the exchange
+-- freeze (FXConstants.HitStop), so a burst of hits holds the body once, briefly, rather than pinning it for
+-- as long as they keep arriving. Caller supplies the duration: this module owns HOW to freeze, not which
+-- outcome deserves how long. Returns how long the freeze will still hold (0 when none started and none is
+-- running) -- the delay a launch must wait out.
+function HitStop.FreezeVictimMovement(seconds: number, ageSeconds: number?): number
+	local now = os.clock()
+	local granted = admit(victimChain, HitStop.AgedSeconds(seconds, ageSeconds), now)
+	if granted > 0 then
+		victimFreezeUntil = victimChain.HeldUntil
+		if not victimFreezeConnection then
+			victimFreezeConnection = RunService.Heartbeat:Connect(onVictimFreezeHeartbeat)
+		end
+		bindInputHold()
+		logger:debug("Combat victim hit-stop", { seconds = granted })
+	end
+	return HitStop.VictimFreezeRemaining()
+end
+
+-- How much of the victim freeze is still to hold, 0 when none is.
+function HitStop.VictimFreezeRemaining(): number
+	local until_ = victimFreezeUntil
+	return if until_ then math.max(until_ - os.clock(), 0) else 0
 end
 
 -- Slows the LOCAL player's own walking to `multiplier` of their input until `seconds` from now -- the stun

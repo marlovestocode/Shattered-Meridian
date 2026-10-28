@@ -63,6 +63,7 @@ local QiSystem = require(script.Parent.QiSystem)
 local TierSystem = require(script.Parent.TierSystem)
 local QiDeviationSystem = require(script.Parent.QiDeviationSystem)
 local ArtTreeManager = require(script.Parent.Parent.Managers.ArtTreeManager)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("ArtSystem")
 
@@ -517,6 +518,11 @@ local function onProfileLoaded(player: Player): ()
 end
 
 function ArtSystem.Init(): ()
+	PlayerStateSystem.Register("ArtState", function(player: Player)
+		if PlayerDataSystem.IsLoaded(player) then
+			sendArtState(player)
+		end
+	end)
 	local endpoint = Endpoint.Scope("ArtSystem", logger)
 	local RemoteNames = ArtConstants.RemoteNames
 	local rateLimited = { Success = false, Reason = "RateLimited" }

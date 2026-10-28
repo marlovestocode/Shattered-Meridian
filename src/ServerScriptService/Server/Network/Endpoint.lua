@@ -31,7 +31,8 @@
 		local pushed = endpoint.Push(RemoteNames.SomethingUpdated)   -- a server -> client remote the System FireClients
 
 	`Event`/`Function` return `{ Remote, Handle }`; `Handle(player, ...)` is the composed handler, for specs (the harness cannot
-	`FireServer`). `Push` returns the RemoteEvent (or UnreliableRemoteEvent with `Unreliable = true`: traffic that is SAFE TO LOSE,
+	`FireServer`). An Event's result also carries its `Connection`, for a System that tears its handlers down in a `Stop` and may
+	Init again (DomainSystem adds it to its Trove); a Function has none to give, since OnServerInvoke is a property. `Push` returns the RemoteEvent (or UnreliableRemoteEvent with `Unreliable = true`: traffic that is SAFE TO LOSE,
 	see NetworkBridge).
 
 	THE LIMITER IS REQUIRED and is always the System's own `RateLimiter.New(...)`, created in its own file: RateLimiter reports
@@ -102,6 +103,8 @@ export type Bound = {
 	Remote: Instance,
 	-- The composed handler (limiter, decode, pcall around Handler). What the remote's connection calls.
 	Handle: (player: Player, ...any) -> any,
+	-- Event only: the OnServerEvent connection, for a System whose Stop must disconnect it.
+	Connection: RBXScriptConnection?,
 }
 
 export type Scope = {
@@ -179,8 +182,8 @@ function Endpoint.Scope(owner: string, logger: Logger.LoggerScope): Scope
 			end
 		end
 
-		remote.OnServerEvent:Connect(handle)
-		return { Remote = remote, Handle = handle }
+		local connection = remote.OnServerEvent:Connect(handle)
+		return { Remote = remote, Handle = handle, Connection = connection }
 	end
 
 	function scope.Function(spec: FunctionSpec): Bound

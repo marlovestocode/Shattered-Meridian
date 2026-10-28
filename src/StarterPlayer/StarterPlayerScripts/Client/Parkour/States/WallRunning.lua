@@ -205,7 +205,7 @@ local function selectWall(context: ParkourContext, requireFacing: boolean): (Wal
 		-- would: ParkourMath.WallTangent orients the tangent to agree with travel, so travel-vs-tangent
 		-- is small by construction whichever way along the wall the character is moving. All it can
 		-- actually refuse is running INTO the wall. Facing is the independent witness -- and under shift
-		-- lock (Client/Camera/ShiftLockCamera.lua) it is a genuinely separate vector, since WASD is
+		-- lock (Client/Camera/CombatCamera.lua) it is a genuinely separate vector, since WASD is
 		-- camera-relative with AutoRotate off, so holding S past a wall gives the tangent a perfectly
 		-- good backward direction to run along while the character looks the other way down it.
 		-- Refuses with 180 rather than the measured angle because the number in that slot is the

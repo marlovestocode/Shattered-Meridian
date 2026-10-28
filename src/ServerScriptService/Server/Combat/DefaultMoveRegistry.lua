@@ -38,6 +38,12 @@
 	stage a different move. Everything the list above protects is gameplay identity; this is not. The
 	weapon's own SFX folder still answers every moment the override leaves unset.
 
+	AND RAGDOLL (2026-10-27, Shared/Ragdoll/RagdollTypes). The one GAMEPLAY block a stage may carry, by the
+	user's call that any move can put a body down: a heavy that crumples, a finisher that hurls the corpse. It
+	does not change what the stage IS -- its timing, reach, string and launch stay the weapon's -- only what a
+	landed hit does to the body afterwards, and it is refused beside a launcher, which a stage may not carry
+	anyway (the air combo owns that body).
+
 	Persistence is MoveEditorSystem's: it writes an override record per move and replays it through
 	ApplyEdit at boot. This module is memory-only, like MoveRegistryManager.
 
@@ -57,6 +63,7 @@ local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local RagdollTypes = require(ReplicatedStorage.Shared.Ragdoll.RagdollTypes)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
@@ -103,6 +110,7 @@ export type Override = {
 	PostureDamage: number,
 	MaxTargets: number?,
 	Presentation: MoveTypes.MovePresentation?,
+	Ragdoll: MoveTypes.MoveRagdoll?,
 }
 
 -- The descriptor list and its index, built once. Safe to cache for the session: the roster is built at
@@ -277,6 +285,7 @@ local function applyOverride(move: MoveTypes.MoveDefinition, override: Override)
 	move.PostureDamage = override.PostureDamage
 	move.MaxTargets = override.MaxTargets
 	move.Presentation = if override.Presentation then MovePresentationTypes.Copy(override.Presentation) else nil
+	move.Ragdoll = if override.Ragdoll then RagdollTypes.Copy(override.Ragdoll) else nil
 end
 
 -- The move as the game ships it: the weapon's projection with any shipped override laid over it.
@@ -391,6 +400,7 @@ local function validateOverride(moveId: string, candidate: unknown): (Override?,
 		PostureDamage = validated.PostureDamage,
 		MaxTargets = validated.MaxTargets,
 		Presentation = validated.Presentation,
+		Ragdoll = validated.Ragdoll,
 	},
 		nil
 end

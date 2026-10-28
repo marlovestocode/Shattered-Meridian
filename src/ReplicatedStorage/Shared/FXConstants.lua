@@ -34,17 +34,21 @@ local FXConstants = {
 	-- Frequency the noise oscillation rate (higher = jitterier), DurationSeconds the decay time --
 	-- CameraShake eases each to zero over its duration (see that module). Scaled by impact weight:
 	-- a light basic hit barely nudges, a posture break / finisher slam rocks the frame.
+	--
+	-- The COMBAT presets were taken down about a third on 2026-10-27 (amplitude x0.7, duration x0.85): in a fast
+	-- exchange they overlapped into a constantly moving frame. Parkour's own presets (ParkourConstants.Shake) and the two
+	-- movement ones below (SlideStart, Roll) were left as they were.
 	CameraShake = {
-		HitLight = { Amplitude = 0.012, Frequency = 28, DurationSeconds = 0.18 },
-		HitHeavy = { Amplitude = 0.025, Frequency = 24, DurationSeconds = 0.28 },
-		Parry = { Amplitude = 0.03, Frequency = 34, DurationSeconds = 0.22 },
+		HitLight = { Amplitude = 0.008, Frequency = 28, DurationSeconds = 0.15 },
+		HitHeavy = { Amplitude = 0.017, Frequency = 24, DurationSeconds = 0.24 },
+		Parry = { Amplitude = 0.021, Frequency = 34, DurationSeconds = 0.19 },
 		-- A PERFECT parry (DefenseConstants.PerfectParry) -- sharper and longer than Parry, both roles.
-		PerfectParry = { Amplitude = 0.042, Frequency = 40, DurationSeconds = 0.32 },
+		PerfectParry = { Amplitude = 0.03, Frequency = 40, DurationSeconds = 0.27 },
 		-- A body slammed into a wall (EnvironmentReactionSystem's wall splat). Low and heavy, the victim's
 		-- read; the attacker gets the lighter HitHeavy.
-		WallSplat = { Amplitude = 0.05, Frequency = 16, DurationSeconds = 0.42 },
-		PostureBreak = { Amplitude = 0.045, Frequency = 20, DurationSeconds = 0.4 },
-		FinisherSlam = { Amplitude = 0.05, Frequency = 18, DurationSeconds = 0.45 },
+		WallSplat = { Amplitude = 0.035, Frequency = 16, DurationSeconds = 0.36 },
+		PostureBreak = { Amplitude = 0.032, Frequency = 20, DurationSeconds = 0.34 },
+		FinisherSlam = { Amplitude = 0.035, Frequency = 18, DurationSeconds = 0.38 },
 		-- One-shot kick at Slide-start (CombatClient.lua's predictSlide/Combat_SlidePerformed) --
 		-- lighter than any combat preset, a movement flourish rather than an impact.
 		SlideStart = { Amplitude = 0.02, Frequency = 22, DurationSeconds = 0.2 },
@@ -99,12 +103,39 @@ local FXConstants = {
 		-- every landed hit left the clip behind the swing and the next swing cut its follow-through short.
 		-- 1.5 recovers a 0.09s freeze over the next 0.18s. Combat only; the flight freeze does not catch up.
 		CatchUpSpeedMultiplier = 1.5,
+		-- THE CHAIN RULES (2026-10-27 smoothness pass). Every freeze above is longer than MinIntervalSeconds, so a
+		-- fast string, a volley or two attackers on one body overlapped freezes back to back and each one EXTENDED
+		-- the hold: the arms stayed stopped for as long as hits kept arriving, then caught up at 1.5x for twice as
+		-- long again -- "stuck" well after any one hit-stop should have ended. Now a run of overlapping freezes is
+		-- one CHAIN that holds at most MaxChainSeconds in total, a freeze that would not extend the hold is dropped
+		-- (it can never shorten one either), and once a chain ends the bodies get ChainGapSeconds of free motion
+		-- before the next chain may start.
+		MaxChainSeconds = 0.22,
+		ChainGapSeconds = 0.06,
+		-- A freeze shorter than this is not started: under ~2 frames it reads as a hitch, not a beat.
+		MinFreezeSeconds = 0.03,
+		-- LATENCY AGING. A server verdict arrives one-way latency after the contact; holding the full beat from
+		-- ARRIVAL stacked the trip on top of the freeze, so on 150 ms the stop landed late and ran long. A verdict's
+		-- freeze is shortened by its age, never below MinStingerSeconds, so the contact still reads. A predicted
+		-- impact (the attacker's own client) has no age and holds its full beat.
+		AgeByLatency = true,
+		MinStingerSeconds = 0.04,
+		-- The stun slow's last stretch eases from HitSlowMultiplier back to full speed instead of cutting from a
+		-- crawl to a sprint on one frame -- that cliff read as the controls "unsticking" late.
+		SlowReleaseSeconds = 0.12,
 		-- Flight landing-impact freeze (HitStop.FreezeFlightLanding, Client/FX/FlightAnimator.
 		-- FreezeActiveFlightTrack) -- much lighter than a combat hit-stop since this is cosmetic
 		-- feedback, not a clash beat; Hard is closer to PostureBreakSeconds' weight (a real, heavy
 		-- landing), Soft barely more than a single frame.
 		FlightLandingSoftSeconds = 0.05,
 		FlightLandingHardSeconds = 0.16,
+	},
+
+	-- Every client Highlight shares one budget (Client/FX/HighlightBudget.lua): the engine renders at most 31 at once and
+	-- silently skips the rest. Below that limit, so a refused effect is the one that asked last rather than whichever one the
+	-- engine happened to drop. HitFlash's PoolMaxSize below is its own share within this.
+	HighlightBudget = {
+		MaxLive = 24,
 	},
 
 	-- Victim hit-flash (a pooled Highlight, HitFlash.lua). DurationSeconds is how long the flash
@@ -351,13 +382,27 @@ local FXConstants = {
 				Acceleration = Vector3.new(0, -10, 0),
 				LightEmission = 1,
 			},
+			-- A projectile BURSTING where it ended (ProjectileTypes.ExplodeOn) -- the Burst moment's default.
+			-- The world scatter's palette, far denser and faster: the blast reaches bodies, so it must read
+			-- as more than a shot fizzling on a wall.
+			ProjectileBurst = {
+				Count = 40,
+				Color = ColorSequence.new(Color3.fromRGB(255, 235, 210), Color3.fromRGB(160, 110, 240)),
+				Speed = NumberRange.new(18, 36),
+				LifetimeSeconds = NumberRange.new(0.2, 0.45),
+				Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.55), NumberSequenceKeypoint.new(1, 0) }),
+				Drag = 5,
+				Acceleration = Vector3.new(0, -15, 0),
+				LightEmission = 1,
+			},
 		},
 		-- The camera punch a preset carries, if any -- a fast FOV tighten-and-release through FOVOffset (so
 		-- the settings.Comfort.FieldOfViewEffects toggle covers it), on both participants' clients. Keyed
 		-- by preset, not outcome, so the perfect parry's harder punch is data rather than a branch.
 		Punches = {
-			Parried = { FOVDelta = -4, OutSeconds = 0.04, BackSeconds = 0.2 },
-			ParriedPerfect = { FOVDelta = -8, OutSeconds = 0.035, BackSeconds = 0.32 },
+			-- Was -4 / -8 until 2026-10-27; a perfect parry still punches clearly harder than a plain one.
+			Parried = { FOVDelta = -2.5, OutSeconds = 0.04, BackSeconds = 0.2 },
+			ParriedPerfect = { FOVDelta = -5, OutSeconds = 0.035, BackSeconds = 0.28 },
 		} :: { [string]: { FOVDelta: number, OutSeconds: number, BackSeconds: number } },
 	},
 

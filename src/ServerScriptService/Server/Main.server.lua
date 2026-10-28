@@ -41,6 +41,7 @@ local BootManifest = require(Config.BootManifest)
 local ServerHopSystem = require(Systems.ServerHopSystem)
 local VersionWatchSystem = require(Systems.VersionWatchSystem)
 local PlayerDataSystem = require(Systems.PlayerDataSystem)
+local PlayerStateSystem = require(Systems.PlayerStateSystem)
 local SettingsSystem = require(Systems.SettingsSystem)
 local InventorySystem = require(Systems.InventorySystem)
 local ResourceGatheringSystem = require(Systems.ResourceGatheringSystem)
@@ -58,6 +59,7 @@ local RaceManager = require(Managers.RaceManager)
 local RaceSystem = require(Systems.RaceSystem)
 local KitAbilitySystem = require(Systems.KitAbilitySystem)
 local KitEditorSystem = require(Systems.KitEditorSystem)
+local WorldArchitectSystem = require(Systems.WorldArchitectSystem)
 local CharacterSheetSystem = require(Systems.CharacterSheetSystem)
 local ProgressionSystem = require(Systems.ProgressionSystem)
 local AchievementSystem = require(Systems.AchievementSystem)
@@ -77,6 +79,7 @@ local EngagementSystem = require(Combat.Engagement.EngagementSystem)
 local KnockbackAudit = require(Combat.Damage.KnockbackAudit)
 local MovementGuard = require(Combat.MovementGuard)
 local EnvironmentReactionSystem = require(Combat.Environment.EnvironmentReactionSystem)
+local RagdollSystem = require(Combat.Ragdoll.RagdollSystem)
 local CombatTrace = require(Combat.CombatTrace)
 local DomainSystem = require(Combat.Domain.DomainSystem)
 local WeaponVisualSystem = require(Combat.Weapon.WeaponVisualSystem)
@@ -148,6 +151,11 @@ boot("VersionWatchSystem", VersionWatchSystem)
 
 -- 3. Data layer next: every other System reads/writes player state through PlayerDataSystem.
 boot("PlayerDataSystem", PlayerDataSystem)
+
+-- 3a. PlayerStateSystem has no dependency: it creates the client's one PlayerState_Replay request. The Systems below register
+--     their slices' snapshots with it from their own Inits, which only appends to a list, so its place only has to come
+--     before the first client could ask -- i.e. anywhere in this boot.
+boot("PlayerStateSystem", PlayerStateSystem)
 
 -- 3b. SettingsSystem's only dependency is PlayerDataSystem immediately above (Transform/GetProfile
 --     on Types.PlayerProfile.settings) -- boots here, right next to it, rather than later alongside
@@ -435,6 +443,11 @@ boot("MovementGuard", MovementGuard)
 --     so it has no place in the combat layers' connection-order requirement.
 boot("EnvironmentReactionSystem", EnvironmentReactionSystem)
 
+--     RagdollSystem -- physical ragdolls (Shared/Ragdoll). A sibling on DamageSystem.OnApplied, applying exactly the
+--     DamageResult.Ragdoll the damage layer resolved; reaches down only through RootControl and MovementAllowance.
+--     After DamageSystem so the subscription has something to attach to; its Step is a CombatTick phase.
+boot("RagdollSystem", RagdollSystem)
+
 --     CombatTrace -- the "why did that attack do that" log (Live Console, scope CombatTrace). A read-only sibling on
 --     OnPressRefused, OnSwingAccepted, OnResolved and OnApplied; after all three layers so every one exists. It
 --     decides nothing, so its place in the order is for readability only.
@@ -626,6 +639,12 @@ boot("MoveEditorSystem", MoveEditorSystem)
 --       the one real ordering requirement here. Nothing else in this sequence depends on it existing
 --       first.
 boot("KitEditorSystem", KitEditorSystem)
+
+-- 22b3. WorldArchitectSystem (the admin world-construction tool) boots in the same whitelist-gated dev-tooling
+--       cluster. It loads the Live world slot from its own DataStore on its own thread and materialises it under
+--       Workspace.ArchitectWorld; nothing else in this sequence reads that folder, and it reads no other System.
+--       Like MoveEditorSystem/KitEditorSystem it must ship in every build: it is what rebuilds the managed world.
+boot("WorldArchitectSystem", WorldArchitectSystem)
 
 -- 22c. LiveConsoleSystem (the Live Admin Console's server half) boots right after MoveEditorSystem,
 --      the same whitelist-gated dev-tooling cluster -- its own Logger.OnEntry registration only

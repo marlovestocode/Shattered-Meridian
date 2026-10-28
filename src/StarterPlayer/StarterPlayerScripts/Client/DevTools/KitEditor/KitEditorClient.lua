@@ -31,7 +31,6 @@
 	from outside" pattern MoveEditorClient.lua/DevMenuClient.lua already use.
 ]]
 
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -44,7 +43,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local KitEditorModule = require(script.Parent.Parent.Parent.UI.Screens.DevTools.KitEditor)
 local KitEditorTypes = require(script.Parent.Parent.Parent.UI.Screens.DevTools.KitEditor.Types)
-local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Parent.Input.InputRouter)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
 local RemoteInvoker = require(script.Parent.Parent.Parent.Network.RemoteInvoker)
 
@@ -238,14 +237,16 @@ local function startKitEditor(
 		end
 	end)
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if KeybindManager.Matches("OpenKitEditor", input) then
+	-- The router's System layer: never modal-gated (the panel IS the modal), and the chat-box check stays here.
+	InputRouter.Bind("OpenKitEditor", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
 			setOpen(not peek(handle.IsOpen))
-		end
-	end)
+		end,
+	})
 
 	handle.CloseRequested:Connect(requestClose)
 

@@ -15,7 +15,6 @@
 	DevMenuClient.lua already uses.
 ]]
 
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -25,7 +24,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local BugReportModule = require(script.Parent.Parent.UI.Screens.BugReport)
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 
@@ -89,16 +88,18 @@ function BugReportClient.Start(handle: BugReportHandle, chrome: Chrome.ChromeHan
 		logger:debug("Bug report form closed on Escape")
 	end)
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if KeybindManager.Matches("OpenBugReport", input) then
+	-- The router's System layer: never modal-gated (the panel IS the modal), and the chat-box check stays here.
+	InputRouter.Bind("OpenBugReport", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			logger:debug("Bug report form toggled", { open = nowOpen })
-		end
-	end)
+		end,
+	})
 
 	handle.SubmitRequested:Connect(function(category: string, description: string)
 		logger:debug("SubmitRequested received", { category = category })

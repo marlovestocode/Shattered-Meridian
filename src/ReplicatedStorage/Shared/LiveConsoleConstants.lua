@@ -19,9 +19,9 @@
 ]]
 
 -- Live Admin Console (F5) -- whitelist-gated, same trust model as Constants.Debug.DevMenu/
--- Constants.MoveEditor above: every remote below is gated by LiveConsoleSystem.lua's own
--- checkLiveConsolePreconditions (AdminConfig.AuthorizedUserIds + a dedicated rate-limit bucket),
--- mirroring DevMenuSystem.lua's checkDevMenuPreconditions exactly. Unlike DevMenu/MoveEditor this
+-- Constants.MoveEditor above: Subscribe is an admin Endpoint in LiveConsoleSystem.lua
+-- (AdminConfig.AuthorizedUserIds + a dedicated rate-limit bucket, through AdminGate), the same gate
+-- DevMenuSystem's remotes use; Unsubscribe is ungated by design (see that System's header). Unlike DevMenu/MoveEditor this
 -- is NOT Studio-only tooling wrapped around Studio-only data -- it exists specifically to work in a
 -- live server, where Shared/Logger.lua's own Output gate (RunService:IsStudio()) correctly stays
 -- silent. See Logger.lua's own header for how its always-on capture buffer makes that safe.

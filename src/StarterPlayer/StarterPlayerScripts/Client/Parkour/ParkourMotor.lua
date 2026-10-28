@@ -43,9 +43,10 @@
 	                   principle, applied here to position instead of a track.
 
 	TAKING THE BODY IS A PAIRED OPERATION. Owning a character means more than driving it: it means
-	holding four things that belong to somebody else -- HipHeight, AutoRotate, two Humanoid states, and
-	(through the ParkourFacingOwned Attribute) Client/Camera/ShiftLockCamera.lua's own per-frame yaw
-	write. captureRestorables takes all four and restoreRestorables puts all four back, and the ONLY
+	holding four things that belong to somebody else -- HipHeight, AutoRotate (a Client/Movement/TurnGate
+	claim, so shift lock, a swing or a throw holding it too is never undone by our release), two Humanoid
+	states, and (through the ParkourFacingOwned Attribute) Client/Camera/CombatCamera.lua's own
+	per-frame yaw write. captureRestorables takes all four and restoreRestorables puts all four back, and the ONLY
 	thing that says which side of that pair we are on is the `ownsBody` flag -- deliberately not the
 	drive mode, which is a different question with a different answer on the frames where it matters.
 	See that flag's own header for the failure that taught the difference.
@@ -69,6 +70,8 @@ local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local ParkourMath = require(ReplicatedStorage.Shared.Parkour.ParkourMath)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+
+local TurnGate = require(script.Parent.Parent.Movement.TurnGate)
 
 type MotorCommand = ParkourTypes.MotorCommand
 type DriveMode = ParkourTypes.DriveMode
@@ -121,13 +124,9 @@ local rootPart: BasePart? = nil
 local activeMode: DriveMode = "Humanoid"
 
 -- Captured at the moment this module first takes the body, restored when it gives it back. Captured
--- rather than assumed because both are legitimately owned by other systems: HipHeight is a rig
--- property that varies per avatar, and AutoRotate belongs to Client/Camera/ShiftLockCamera.lua while
--- shift lock is engaged (that module writes it false on engage and true on release). Capturing means
--- a parkour action taken while shift-locked restores `false`, not a hardcoded `true` that would
--- silently break shift lock for the rest of the life.
+-- rather than assumed because HipHeight is a rig property that varies per avatar. (AutoRotate is not
+-- captured: this module holds a TurnGate claim while it owns the body, and the gate answers for the rest.)
 local capturedHipHeight: number? = nil
-local capturedAutoRotate: boolean? = nil
 local appliedHipHeightDelta = 0
 
 -- WHETHER THIS MODULE CURRENTLY HOLDS THE BODY'S RESTORABLES, tracked explicitly rather than inferred
@@ -139,7 +138,7 @@ local appliedHipHeightDelta = 0
 -- left AutoRotate/HipHeight captured, the guarded Humanoid states disabled and -- worst of all --
 -- ParkourFacingOwned raised, while activeMode still read "Humanoid". The next ordinary walking frame
 -- then found `activeMode == "Humanoid"`, skipped the restore entirely, and nothing ever put any of it
--- back: Client/Camera/ShiftLockCamera.lua kept its yaw write suspended against an Attribute that would
+-- back: Client/Camera/CombatCamera.lua kept its yaw write suspended against an Attribute that would
 -- now never fall, with AutoRotate still false underneath it, so the character could not turn at all for
 -- the rest of the life. That is the reported "locked after a parkour move," and it self-healed only
 -- when some LATER traversal happened to end through the restore path.
@@ -174,7 +173,7 @@ local ownsBody = false
 -- RootControlLocked/Flying Attributes. GettingUp is absent for a simpler reason: with FallingDown
 -- disabled there is no route into it.
 --
--- Captured rather than assumed, and restored on release, for the same reason AutoRotate is: these are
+-- Captured rather than assumed, and restored on release, because these are
 -- legitimately owned by other systems, and writing back a hardcoded `true` would hand them a character
 -- whose states they never set that way.
 local GUARDED_HUMANOID_STATES = {
@@ -329,7 +328,7 @@ local function setGravityCancel(part: BasePart, enabled: boolean): ()
 end
 
 -- Announces whether this module currently owns the character's ROTATION, via the Attribute
--- Client/Camera/ShiftLockCamera.lua watches (see AttributeConstants.ParkourFacingOwned for why this
+-- Client/Camera/CombatCamera.lua watches (see AttributeConstants.ParkourFacingOwned for why this
 -- is an Attribute rather than a direct call). That module writes root.CFrame to camera yaw EVERY
 -- render step while shift lock is engaged and has no idea parkour exists -- its only other guards are
 -- the combat/flight Attributes -- so for the full duration of a traversal it contested this module's
@@ -358,9 +357,9 @@ local function captureRestorables(currentHumanoid: Humanoid): ()
 	if capturedHipHeight == nil then
 		capturedHipHeight = currentHumanoid.HipHeight
 	end
-	if capturedAutoRotate == nil then
-		capturedAutoRotate = currentHumanoid.AutoRotate
-	end
+	-- Off while the orientation drive owns facing: the two write the same rotation from different
+	-- sources every frame and visibly fight when both are live.
+	TurnGate.Set(currentHumanoid, TurnGate.Owners.Parkour, true)
 	-- Guarded once per period of ownership, not per frame: SetStateEnabled is a property write with a
 	-- signal behind it, and the whole point of the `capturedStateEnabled == nil` test is that this runs
 	-- on the transition into ownership rather than sixty times a second for its duration.
@@ -374,31 +373,16 @@ local function captureRestorables(currentHumanoid: Humanoid): ()
 	end
 end
 
--- ORDER IS LOAD-BEARING HERE, and it is the reverse of what it used to be.
---
--- setFacingOwned(false) is now the LAST thing this function does, because that write is not private:
--- Client/Camera/ShiftLockCamera.lua watches ParkourFacingOwned and, on the falling edge, reasserts
--- `AutoRotate = not engaged` -- deliberately, to repair the case where the player toggled shift lock
--- DURING a traversal and this module's capture therefore holds a value that is no longer correct (see
--- that handler's own comment).
---
--- With the release first, that repair was still correct and still ran -- and was then immediately
--- overwritten by the stale `capturedAutoRotate` write below it. Whether the clobber actually lands
--- depends on the place's SignalBehavior: under Deferred the handler resumes after this function
--- returns and wins, under Immediate it runs synchronously inside the SetAttribute call and loses. A
--- correctness property that flips on a place-level engine setting nobody in this repo sets explicitly
--- is not a property at all, so the order is now the one that is right under both: put every captured
--- value back FIRST, then hand rotation over, so the compensating handler always runs last and always
--- has the final say.
+-- Puts every captured value back FIRST and hands rotation over (setFacingOwned(false)) LAST, because that
+-- write is not private: CombatCamera resumes its yaw write on the falling edge, and under Immediate
+-- SignalBehavior it does so inside the SetAttribute call. Everything it reads must already be settled.
+-- (It used to re-assert AutoRotate there to repair a stale capture of ours; TurnGate retired both.)
 local function restoreRestorables(currentHumanoid: Humanoid): ()
 	if capturedHipHeight ~= nil then
 		currentHumanoid.HipHeight = capturedHipHeight
 		capturedHipHeight = nil
 	end
-	if capturedAutoRotate ~= nil then
-		currentHumanoid.AutoRotate = capturedAutoRotate
-		capturedAutoRotate = nil
-	end
+	TurnGate.Set(currentHumanoid, TurnGate.Owners.Parkour, false)
 	local captured = capturedStateEnabled
 	if captured ~= nil then
 		for stateType, wasEnabled in captured do
@@ -422,7 +406,6 @@ function ParkourMotor.BindCharacter(_nextCharacter: Model, nextHumanoid: Humanoi
 	rootPart = nextRootPart
 	activeMode = "Humanoid"
 	capturedHipHeight = nil
-	capturedAutoRotate = nil
 	-- Dropped rather than restored: these belonged to the PREVIOUS character's Humanoid, which is either
 	-- gone or about to be. Leaving the table populated would make the next capture believe the new
 	-- character is already guarded and skip it, so the whole life would run unprotected -- the same
@@ -648,9 +631,6 @@ function ParkourMotor.Apply(): boolean
 		if drive and drive:IsA("LinearVelocity") then
 			applyVelocityDrive(drive, command.Velocity, command.PlanarOnly)
 		end
-		-- AutoRotate off while the orientation drive owns facing: the two write the same rotation
-		-- from different sources every frame and visibly fight when both are live.
-		currentHumanoid.AutoRotate = false
 		applyFacing(part, command.FaceDirection)
 		applyHipHeight(currentHumanoid, command.HipHeightDelta)
 		activeMode = "Velocity"
@@ -673,7 +653,6 @@ function ParkourMotor.Apply(): boolean
 	end
 	setGravityCancel(part, false)
 	ensureKinematicRig(part)
-	currentHumanoid.AutoRotate = false
 	local positionDrive = part:FindFirstChild(POSITION_DRIVE_NAME)
 	if positionDrive and positionDrive:IsA("AlignPosition") then
 		positionDrive.Position = target.Position
@@ -785,25 +764,6 @@ end
 function ParkourMotor.IsJumpEnabled(): boolean
 	local currentHumanoid = humanoid
 	return currentHumanoid ~= nil and currentHumanoid:GetStateEnabled(Enum.HumanoidStateType.Jumping)
-end
-
--- Whether something OUTSIDE this framework is steering the character's facing -- in practice,
--- Client/Camera/ShiftLockCamera.lua, which writes AutoRotate false on engage (see capturedAutoRotate's
--- own header). Answered from the value the rest of the game left, not the live property: while this
--- module owns the body it has written AutoRotate false itself, so the live read would say "yes" for
--- every owned frame. The captured value is the honest answer then; the live one is when nothing is
--- captured.
---
--- A question about AutoRotate rather than a require of ShiftLockCamera, deliberately: this is the
--- signal shift lock already publishes, and anything else that takes the character's rotation the same
--- way gets the same answer for free.
-function ParkourMotor.IsFacingHeldElsewhere(): boolean
-	local captured = capturedAutoRotate
-	if captured ~= nil then
-		return captured == false
-	end
-	local currentHumanoid = humanoid
-	return currentHumanoid ~= nil and currentHumanoid.AutoRotate == false
 end
 
 -- Which mode was last committed -- read by the debug overlay and by ParkourController when deciding

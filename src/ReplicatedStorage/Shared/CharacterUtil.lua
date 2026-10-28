@@ -91,7 +91,7 @@ end
 -- `character`'s HumanoidRootPart, on the same contract as AwaitHumanoid. A separate call rather than
 -- a second return value because the two are wanted independently: PlayerLifecycle waits for the
 -- Humanoid alone (see its own header on why it knows about exactly one part of a character), and
--- ShiftLockCamera/DefenseClient are handed a resolved Humanoid and wait only for the root.
+-- CombatCamera/DefenseClient are handed a resolved Humanoid and wait only for the root.
 function CharacterUtil.AwaitRoot(character: Model): BasePart?
 	local rootPart = character:WaitForChild("HumanoidRootPart", Constants.Network.WaitForChildTimeoutSeconds)
 	if rootPart and rootPart:IsA("BasePart") then

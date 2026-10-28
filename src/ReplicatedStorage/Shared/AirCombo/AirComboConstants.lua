@@ -214,17 +214,19 @@ AirComboConstants.Presentation = {
 	MaxDrawDistanceStuds = 250,
 	-- Camera weight per contact (the attacker's and the victim's own clients), as FOVOffset punches and
 	-- CameraShake presets. The finisher hits hardest; the clash is its own, and a perfect parry heavier still.
+	-- Taken down about 40% on 2026-10-27 (punches were 2.5 / 4 / 7 / 9, shakes 0.02 / 0.03 / 0.06 / 0.05): a string
+	-- stacked one per hit and the view never settled. The order -- hit < launch < finisher < clash -- is unchanged.
 	Punch = {
-		Hit = { Delta = 2.5, OutSeconds = 0.04, BackSeconds = 0.14 },
-		Launch = { Delta = 4, OutSeconds = 0.05, BackSeconds = 0.2 },
-		Finisher = { Delta = 7, OutSeconds = 0.05, BackSeconds = 0.3 },
-		Clash = { Delta = 9, OutSeconds = 0.04, BackSeconds = 0.3 },
+		Hit = { Delta = 1.5, OutSeconds = 0.04, BackSeconds = 0.14 },
+		Launch = { Delta = 2.5, OutSeconds = 0.05, BackSeconds = 0.2 },
+		Finisher = { Delta = 4.5, OutSeconds = 0.05, BackSeconds = 0.28 },
+		Clash = { Delta = 5.5, OutSeconds = 0.04, BackSeconds = 0.28 },
 	},
 	Shake = {
-		Hit = { Amplitude = 0.02, Frequency = 22, DurationSeconds = 0.14 },
-		Launch = { Amplitude = 0.03, Frequency = 20, DurationSeconds = 0.22 },
-		Finisher = { Amplitude = 0.06, Frequency = 18, DurationSeconds = 0.45 },
-		Clash = { Amplitude = 0.05, Frequency = 24, DurationSeconds = 0.3 },
+		Hit = { Amplitude = 0.013, Frequency = 22, DurationSeconds = 0.13 },
+		Launch = { Amplitude = 0.02, Frequency = 20, DurationSeconds = 0.2 },
+		Finisher = { Amplitude = 0.04, Frequency = 18, DurationSeconds = 0.38 },
+		Clash = { Amplitude = 0.035, Frequency = 24, DurationSeconds = 0.26 },
 	},
 }
 

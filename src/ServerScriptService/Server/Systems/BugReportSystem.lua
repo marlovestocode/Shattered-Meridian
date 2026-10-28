@@ -31,9 +31,9 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
@@ -49,12 +49,12 @@ local submitRateLimiter = RateLimiter.New(Config.SubmitMaxCallsPerSecond)
 
 -- os.clock()-keyed per-player cooldown, separate from the per-second rate limiter above -- that
 -- one catches raw call-spam; this one enforces the actual "one report per N seconds" product rule.
-local lastSubmitAt: { [Player]: number } = {}
+local lastSubmitAt: { [Player]: number } = PlayerScoped.New("BugReportSystem.lastSubmitAt")
 
 -- Live pagination cursor per admin session -- a DataStorePages object can't cross a Remote
 -- boundary, so the server holds it here and advances it on request instead. Cleared on
 -- PlayerRemoving below.
-local adminPagingSessions: { [Player]: DataStorePages? } = {}
+local adminPagingSessions: { [Player]: DataStorePages? } = PlayerScoped.New("BugReportSystem.adminPagingSessions")
 
 -- Obtained lazily inside Init(), never at module load time, so require()-ing this module stays
 -- side-effect-free (no DataStore I/O merely from requiring it) -- this is what keeps it safe for
@@ -785,15 +785,6 @@ function BugReportSystem.Init(): ()
 			return { Success = false, Reason = "RateLimited" }
 		end,
 		Handler = BugReportSystem.Submit,
-	})
-
-	PlayerLifecycle.BindAllPlayers({
-		Scope = "BugReportSystem",
-		OnPlayerRemoving = function(player: Player)
-			lastSubmitAt[player] = nil
-			submitRateLimiter:Clear(player)
-			adminPagingSessions[player] = nil
-		end,
 	})
 
 	logger:info("BugReportSystem.Init() complete")

@@ -45,7 +45,8 @@ EvadeConstants.CooldownSeconds = 0.9
 EvadeConstants.ServerCooldownToleranceSeconds = 0.15
 
 -- How long an Evade press stays live while something refuses it (Client/Parkour/InputBuffer.PeekEvade).
--- The same 0.35 an attack press gets (AttackConstants.Input.BufferSeconds, 2026-09-29): an evade pressed
+-- The 0.35 an attack press got on 2026-09-29 (AttackConstants.Input.BufferSeconds has since widened to cover a
+-- whole M1, 2026-10-26; an evade has no stun-drop rule to lean on, so it stays here): an evade pressed
 -- a little early in your own recovery or cooldown now fires the moment you are free instead of being
 -- dropped. It used to share parkour's 0.18 ActionBufferSeconds, which is shorter than most recoveries.
 EvadeConstants.BufferSeconds = 0.35

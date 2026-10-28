@@ -52,7 +52,6 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local QiSystem = require(script.Parent.QiSystem)
@@ -62,6 +61,7 @@ local CharacterSheetSystem = require(script.Parent.CharacterSheetSystem)
 local BloodlineManager = require(script.Parent.Parent.Managers.BloodlineManager)
 local BloodlineConstants = require(ReplicatedStorage.Shared.Bloodline.BloodlineConstants)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("BloodlineSystem")
@@ -72,11 +72,12 @@ local BloodlineSystem = {}
 -- "own per-ability cooldown tracked in the System itself" shape RaceSystem.lua's own cooldowns table
 -- already establishes, keyed by BloodlineId rather than AbilityId since only one ability can ever be
 -- reachable per bloodline at a time (whichever the player's CURRENT stage grants).
-local cooldowns: { [Player]: { [string]: number } } = {}
+local cooldowns: { [Player]: { [string]: number } } = PlayerScoped.New("BloodlineSystem.cooldowns")
 
 -- Per-player, per-bloodline count of qualifying kills toward the NEXT stage -- weighted, so it can be
 -- fractional (see this file's header on the spine). Session-only rather than a persisted field.
-local killsTowardNextStage: { [Player]: { [string]: number } } = {}
+local killsTowardNextStage: { [Player]: { [string]: number } } =
+	PlayerScoped.New("BloodlineSystem.killsTowardNextStage")
 
 -- Every public remote in this codebase has one -- see CLAUDE.md's own module table. The spin is
 -- the first remote this System has ever exposed; everything else here is a server-side API other
@@ -618,12 +619,6 @@ local function onProfileLoaded(player: Player): ()
 	recomputeBoundEffects(player)
 end
 
-local function onPlayerRemoving(player: Player): ()
-	cooldowns[player] = nil
-	spinRateLimiter:Clear(player)
-	killsTowardNextStage[player] = nil
-end
-
 -- Reads the reroll count straight off the profile rather than tracking it alongside -- see
 -- BloodlineSpinResult on why every response carries it.
 local function rerollsRemaining(player: Player): number
@@ -653,7 +648,6 @@ function BloodlineSystem.Init(): ()
 	killsTowardNextStage = {}
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
-	PlayerLifecycle.BindAllPlayers({ Scope = "BloodlineSystem", OnPlayerRemoving = onPlayerRemoving })
 
 	-- Defensive pass for a profile that loaded before this Init() ran -- same reasoning QiSystem.
 	-- Init()/ArtSystem.Init()/RaceSystem.Init() each document for their own GetPlayers() loops.

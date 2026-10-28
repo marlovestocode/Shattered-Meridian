@@ -53,7 +53,6 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
@@ -72,7 +71,8 @@ local CombatAnimator = require(script.Parent.Parent.FX.CombatAnimator)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local MovementVFX = require(script.Parent.Parent.FX.MovementVFX)
 local RunAudio = require(script.Parent.Parent.FX.RunAudio)
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
+local SettingsStore = require(script.Parent.Parent.Settings.SettingsStore)
 
 local logger = Logger.scope("RunController")
 
@@ -285,11 +285,9 @@ local function syncEngaged(): ()
 	end
 end
 
-local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
+-- Bound on the router's System layer (Start): never modal-gated, as this never was; the chat-box check stays here.
+local function onSprintBegan(gameProcessed: boolean): ()
 	if gameProcessed then
-		return
-	end
-	if not KeybindManager.Matches("Sprint", input) then
 		return
 	end
 	sprintKeyHeld = true
@@ -301,10 +299,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	syncEngaged()
 end
 
-local function onInputEnded(input: InputObject): ()
-	if not KeybindManager.Matches("Sprint", input) then
-		return
-	end
+local function onSprintEnded(): ()
 	sprintKeyHeld = false
 	syncEngaged()
 end
@@ -607,6 +602,14 @@ function RunController.Start(): ()
 	end
 	started = true
 
+	-- Hold-versus-toggle lives in the Parkour settings block; Autorun is its own (Client/Settings/SettingsStore).
+	SettingsStore.Observe("Parkour", function(settings: Types.ParkourSettings)
+		RunController.SetSprintMode(settings.SprintMode)
+	end)
+	SettingsStore.Observe("Autorun", function(enabled: boolean)
+		RunController.SetAutorun(enabled)
+	end)
+
 	-- Looked up once. The server creates this in RunSystem.Init; GetRemoteEvent waits for it, which is
 	-- the ordinary bounded server-boot delay every other client module's own lookup already tolerates.
 	setSprintingRemote = NetworkBridge.GetRemoteEvent(RunConstants.Network.RemoteNames.SetSprinting)
@@ -621,8 +624,7 @@ function RunController.Start(): ()
 	end
 
 	sessionTrove:Connect(localPlayer.CharacterRemoving, unbind)
-	sessionTrove:Connect(UserInputService.InputBegan, onInputBegan)
-	sessionTrove:Connect(UserInputService.InputEnded, onInputEnded)
+	sessionTrove:Add(InputRouter.Bind("Sprint", { Layer = "System", Began = onSprintBegan, Ended = onSprintEnded }))
 	sessionTrove:Connect(RunService.Heartbeat, stepRun)
 
 	logger:info("RunController started", { stages = RunLadder.MaxStage() })

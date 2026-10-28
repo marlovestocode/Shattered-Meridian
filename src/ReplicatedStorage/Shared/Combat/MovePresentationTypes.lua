@@ -41,6 +41,9 @@
 	    WorldImpact  an End event with Reason "World"
 	    End          an End event with Reason "Range" or "Expired" -- a shot that fizzles. A shot that
 	                 ends on a BODY is a Hit, and plays the Hit cue off Combat_Feedback like any contact.
+	    Burst        an End event carrying Burst -- the shot exploded where it ended (ProjectileTypes
+	                 .ExplodeOn), whatever ended it. Plays instead of WorldImpact/End for that shot; each
+	                 body the blast reaches still gets its own Hit cue.
 
 	  Domain (Domain_State, every client -- only on a move carrying a Domain block, DomainTypes):
 	    DomainOpen    the realm begins to unfurl (Activating), at its centre
@@ -437,6 +440,12 @@ MovePresentationTypes.Moments = {
 		Group = "Projectile",
 		Label = "Fizzles out",
 		Fields = fields(SOUND, "Audience", SPARKS, "Template"),
+	},
+	{
+		Name = "Burst",
+		Group = "Projectile",
+		Label = "Bursts",
+		Fields = fields(SOUND, "Audience", SPARKS, CAMERA, "Template"),
 	},
 
 	{

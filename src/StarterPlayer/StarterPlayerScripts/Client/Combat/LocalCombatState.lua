@@ -90,11 +90,25 @@ function LocalCombatState.SwingEndsAt(): number
 	return swingEndsAt
 end
 
+-- Called whenever the stun deadline moves out -- the opposite edge to OnReleased. DefenseClient drops a held
+-- guard's pose on it, since the guard does nothing while stunned (DefenseConstants.StunParry).
+local stunnedListeners: CallbackList.CallbackList<> = CallbackList.New(logger, "LocalCombatState.OnStunned")
+
 -- Extends, never shortens: a second stunning hit inside the first stun pushes the deadline out.
 function LocalCombatState.NoteHitstun(endsAt: number): ()
 	if endsAt > stunEndsAt then
 		stunEndsAt = endsAt
+		stunnedListeners:Fire()
 	end
+end
+
+function LocalCombatState.OnStunned(listener: () -> ()): () -> ()
+	return stunnedListeners:Connect(listener)
+end
+
+-- When the current stun ends, or 0 when there is none.
+function LocalCombatState.StunEndsAt(): number
+	return stunEndsAt
 end
 
 function LocalCombatState.IsStunned(now: number): boolean

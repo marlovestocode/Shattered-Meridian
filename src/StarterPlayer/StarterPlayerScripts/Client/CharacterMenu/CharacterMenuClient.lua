@@ -29,7 +29,6 @@
 	two remotes (Screens/Menus/BountyTab.lua keeps those -- see its header).
 ]]
 
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -44,10 +43,11 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
 
 local MenusModule = require(script.Parent.Parent.UI.Screens.Menus)
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local HotbarBindings = require(script.Parent.Parent.Combat.HotbarBindings)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
+local ClientState = require(script.Parent.Parent.UI.State.ClientState)
 
 type MenusHandle = MenusModule.MenusHandle
 
@@ -194,8 +194,7 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 		logger:debug("Character menu closed on Escape")
 	end)
 
-	local sheetUpdated = NetworkBridge.GetRemoteEvent(Constants.CharacterSheet.RemoteNames.SheetUpdated)
-	local getSheet = NetworkBridge.GetRemoteFunction(Constants.CharacterSheet.RemoteNames.GetSheet)
+	local sheetRemoteName = Constants.CharacterSheet.RemoteNames.SheetUpdated
 	local artStateUpdated = NetworkBridge.GetRemoteEvent(ArtConstants.RemoteNames.ArtStateUpdated)
 	local getCatalogue = NetworkBridge.GetRemoteFunction(ArtConstants.RemoteNames.GetArtCatalogue)
 	local unlockArt = NetworkBridge.GetRemoteFunction(ArtConstants.RemoteNames.UnlockArt)
@@ -208,7 +207,8 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 	-- hidden. Nothing shows the sheet but the menu, and opening it refetches (handle.Opened ->
 	-- refreshSheet), so a push that lands while it is shut would be paid for and never seen. Watched
 	-- (Shared/SlowWatch.lua) so a slow one says so.
-	sheetUpdated.OnClientEvent:Connect(
+	ClientState.Observe(
+		sheetRemoteName,
 		SlowWatch.Handler(logger, "CharacterMenu.onSheetUpdated", function(payload: Types.CharacterSheetPayload)
 			if not peek(handle.IsOpen) then
 				return
@@ -237,19 +237,13 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 	-- Every RemoteFunction call below is wrapped and spawned: an invoke yields, and a server that
 	-- drops one must cost a status line rather than the whole handler -- the same pcall+task.spawn
 	-- shape BountyTab.lua's own initial fetch uses.
+	-- The latest sheet the server pushed, cached by ClientState (which also asked for it again at boot, PlayerState_Replay), so
+	-- an open needs no round trip. Nothing yet (profile not loaded) leaves the panel's sheet alone.
 	local function refreshSheet(): ()
-		task.spawn(function()
-			local ok, result = RemoteInvoker.Invoke(getSheet)
-			if not ok then
-				logger:warn("Character sheet fetch failed", { error = tostring(result) })
-				return
-			end
-			-- nil is a legitimate answer (profile not loaded yet) and is left alone rather than
-			-- overwriting a sheet that already arrived over the push channel.
-			if isValidSheet(result) then
-				handle.Sheet:set(result :: Types.CharacterSheetPayload)
-			end
-		end)
+		local latest = ClientState.Latest(sheetRemoteName)
+		if isValidSheet(latest) then
+			handle.Sheet:set(latest :: Types.CharacterSheetPayload)
+		end
 	end
 
 	local function refreshCatalogue(): ()
@@ -362,16 +356,18 @@ function CharacterMenuClient.Start(handle: MenusHandle, chrome: Chrome.ChromeHan
 		setStatus(handle, `Slot {slot} set.`)
 	end)
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if KeybindManager.Matches("CharacterMenuToggle", input) then
+	-- The router's System layer: never modal-gated (the panel IS the modal), and the chat-box check stays here.
+	InputRouter.Bind("CharacterMenuToggle", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			logger:debug("Character menu toggled", { open = nowOpen })
-		end
-	end)
+		end,
+	})
 
 	-- One fetch at start, ahead of any open: the profile-load push may have fired before this client
 	-- ever connected its listener above, and a player who opens the Character tab first should not

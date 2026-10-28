@@ -59,7 +59,6 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
-local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -67,6 +66,7 @@ local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local MeridianSystem = require(script.Parent.MeridianSystem)
 local TierSystem = require(script.Parent.TierSystem)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("BountySystem")
 
@@ -99,7 +99,6 @@ local owedByDeath: { [number]: OwedClaim } = {}
 
 local boardUpdatedRemote: RemoteEvent? = nil
 local markedChangedRemote: RemoteEvent? = nil
-local queryRateLimiter = RateLimiter.New(BountyConstants.QueryMaxCallsPerSecond)
 
 -- Every connection this System owns, so Init() can tear down a previous Init()'s subscriptions --
 -- see this file's header on why that matters here specifically.
@@ -426,7 +425,6 @@ function BountySystem.ClearPlayerReferences(departingPlayer: Player): ()
 			owedByDeath[deathId] = nil
 		end
 	end
-	queryRateLimiter:Clear(departingPlayer)
 end
 
 -- Backstop for a marked player who stays online but stops fighting -- see
@@ -477,13 +475,18 @@ function BountySystem.ResetState(): ()
 	lastExpirySweepAt = os.clock()
 end
 
--- Takes no arguments at all -- there is nothing a client could pass that would be honored, which is
--- the cheapest possible validation story for a public remote.
-local function handleGetActiveBounties(_player: Player): { Types.BountyBoardEntry }
-	return BountySystem.ListActiveBounties()
-end
-
 function BountySystem.Init(): ()
+	PlayerStateSystem.Register("BountyMarked", function(player: Player)
+		sendMarkedState(player, activeBountyByTarget[player])
+	end)
+	-- The board everyone sees, re-sent to one client that was not listening yet. This replaced the Bounty_GetActiveBounties
+	-- pull (2026-10-27): ClientState caches the broadcast, and the replay covers the join.
+	PlayerStateSystem.Register("BountyBoard", function(player: Player)
+		if boardUpdatedRemote then
+			local payload: Types.BountyBoardUpdatePayload = { Entries = BountySystem.ListActiveBounties() }
+			boardUpdatedRemote:FireClient(player, payload)
+		end
+	end)
 	for _, connection in ipairs(connections) do
 		connection:Disconnect()
 	end
@@ -501,14 +504,6 @@ function BountySystem.Init(): ()
 	local endpoint = Endpoint.Scope("BountySystem", logger)
 	boardUpdatedRemote = endpoint.Push(BountyConstants.RemoteNames.BoardUpdated)
 	markedChangedRemote = endpoint.Push(BountyConstants.RemoteNames.MarkedChanged)
-
-	-- A rate-limited or failed query answers the empty board, as it always did (ErrorResult).
-	endpoint.Function({
-		Name = BountyConstants.RemoteNames.GetActiveBounties,
-		Limiter = queryRateLimiter,
-		ErrorResult = {} :: { Types.BountyBoardEntry },
-		Handler = handleGetActiveBounties,
-	})
 
 	table.insert(
 		connections,

@@ -27,11 +27,11 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 
 local Notify = require(script.Parent.Parent.UI.Shell.Notify)
 local WeaponInventoryModule = require(script.Parent.Parent.UI.Screens.WeaponInventory)
+local ClientState = require(script.Parent.Parent.UI.State.ClientState)
 
 local logger = Logger.scope("WeaponInventoryClient")
 
@@ -101,8 +101,8 @@ function WeaponInventoryClient.Start(
 	hud = hudHandle
 	notify = notifyHandle
 
-	local remote = NetworkBridge.GetRemoteEvent(WeaponConstants.Network.RemoteNames.InventoryChanged)
-	remote.OnClientEvent:Connect(onInventoryChanged)
+	-- Through ClientState's slice cache: the selection pushed at spawn, before this started, arrives here at once.
+	ClientState.Observe(WeaponConstants.Network.RemoteNames.InventoryChanged, onInventoryChanged)
 
 	logger:debug("WeaponInventoryClient started")
 end

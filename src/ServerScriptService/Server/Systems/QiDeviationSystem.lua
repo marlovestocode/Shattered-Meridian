@@ -48,6 +48,7 @@ local QiDeviationConstants = require(ReplicatedStorage.Shared.QiDeviationConstan
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local CharacterSheetSystem = require(script.Parent.CharacterSheetSystem)
@@ -59,12 +60,12 @@ local QiDeviationSystem = {}
 -- os.clock() a player last had a qualifying (i.e. any) Qi spend processed -- what
 -- ComputeRiskAfterSpend's `elapsedSeconds` is measured against. Absent entirely for a player who
 -- has never spent Qi this session, which onQiSpent below reads as "no time has passed yet."
-local lastSpendAt: { [Player]: number } = {}
+local lastSpendAt: { [Player]: number } = PlayerScoped.New("QiDeviationSystem.lastSpendAt")
 
 -- os.clock() a player's ArtSystem lockout ends. Absent (not merely false) for a player who has
 -- never triggered a Deviation this session -- see this file's header on why this is a deadline,
 -- not a boolean.
-local lockedUntil: { [Player]: number } = {}
+local lockedUntil: { [Player]: number } = PlayerScoped.New("QiDeviationSystem.lockedUntil")
 
 -- Pure formula: given the risk a player already had, how far below the safe line THIS spend left
 -- them (0 when safe or better), and how long it has been since their last processed spend, returns
@@ -145,18 +146,12 @@ local function onQiSpent(player: Player, _amount: number, remaining: number, max
 	debug.profileend()
 end
 
-local function onPlayerRemoving(player: Player): ()
-	lastSpendAt[player] = nil
-	lockedUntil[player] = nil
-end
-
 function QiDeviationSystem.Init(): ()
 	-- Watched (Shared/SlowWatch.lua): this handler runs once per Qi spend, and a realm's upkeep is a steady
 	-- stream of them -- a slow one here shows as a burst the frame counter's scripts figure never sees.
 	GameplayEvents.OnQiSpent(SlowWatch.Handler(logger, "QiDeviation.onQiSpent", onQiSpent))
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "QiDeviationSystem",
-		OnPlayerRemoving = onPlayerRemoving,
 	})
 
 	logger:info("QiDeviationSystem.Init() complete")

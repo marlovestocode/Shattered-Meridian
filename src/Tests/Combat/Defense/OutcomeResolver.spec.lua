@@ -497,7 +497,7 @@ return function()
 			}
 		end
 
-		it("turns two Clean hits on each other in one batch into a Trade on both sides", function()
+		it("turns two Clean hits on each other at the same instant into a Trade on both sides", function()
 			-- Before this, the same frame was a double hit: both stunned, both damaged.
 			local contacts = { makeClean(alpha, beta), makeClean(beta, alpha) }
 			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(2)
@@ -539,6 +539,18 @@ return function()
 			local contacts = { makeClean(alpha, beta, false) }
 			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(0)
 			expect(contacts[1].Result.Kind).to.equal("Clean")
+		end)
+
+		it("lets the earlier of a mutual pair a substep apart land when its defender's blade was not out", function()
+			-- THE EARLIER HIT WINS (2026-10-27): only two hits at the same instant are a clash. Neither contact is
+			-- turned; DefenseSystem then drops the later one, whose swing the earlier hit's stun cancelled.
+			local earlier = makeClean(alpha, beta, false)
+			local later = makeClean(beta, alpha, false)
+			later.SampleTime = 0.004
+			local contacts = { earlier, later }
+			expect(OutcomeResolver.ArbitrateClashes(contacts)).to.equal(0)
+			expect(earlier.Result.Kind).to.equal("Clean")
+			expect(later.Result.Kind).to.equal("Clean")
 		end)
 
 		it("leaves two Clean hits that are not mutual alone", function()

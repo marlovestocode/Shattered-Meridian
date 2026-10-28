@@ -13,6 +13,12 @@ A WRITE is any call to SetAttribute / setAttribute / extendDeadline whose argume
 across line breaks (stylua wraps long calls), and through a local helper that forwards the name. Comments and
 string-free reads (GetAttribute, GetAttributeChangedSignal) are not writes. A new owner is a new row.
 
+The same rule for the two client Humanoid switches that are claim gates (Client/Movement), matched as a
+property write or a state call rather than an Attribute name:
+
+  AutoRotate         four snapshot/restore writers undid each other's holds (TurnGate.lua).
+  Jumping state      three writers handed the jump back while another still held it (JumpGate.lua).
+
 Run: python scripts/check-single-writers.py
 """
 import os
@@ -24,6 +30,21 @@ OWNERS = {
     "RootControlLocked": {"RootControl.lua"},
     "KnockbackUntil": {"MovementAllowance.lua"},
     "HitstunUntil": {"DamageSystem.lua"},
+    # The ragdoll's three: DamageSystem reads them (RagdollRules.Admits) to decide a hit before OnApplied, so a
+    # second writer would make that decision disagree with the body.
+    "Ragdolled": {"RagdollSystem.lua"},
+    "RagdollChainEndsAt": {"RagdollSystem.lua"},
+    "RagdollImmuneUntil": {"RagdollSystem.lua"},
+}
+
+# client switch -> (pattern of a write, the file allowed to make it). Only StarterPlayer is scanned: the
+# server's own writes (AdminActionSystem's flight, a training bot's body) are a different Humanoid's owner.
+CLIENT_SWITCHES = {
+    "AutoRotate": (re.compile(r"\.AutoRotate\s*=(?!=)"), "TurnGate.lua"),
+    "Jumping state": (
+        re.compile(r"SetStateEnabled\s*\(\s*Enum\.HumanoidStateType\.Jumping\b"),
+        "JumpGate.lua",
+    ),
 }
 
 WRITER = re.compile(r"\b(?:SetAttribute|setAttribute|extendDeadline)\s*\(")
@@ -118,10 +139,17 @@ for root, _, files in os.walk("src"):
                     problems.append(
                         f"{path.replace(os.sep, '/')}:{line}: writes {attribute} (owner: {', '.join(sorted(owners))})"
                     )
+        if "StarterPlayer" in root.split(os.sep):
+            for switch, (pattern, owner) in CLIENT_SWITCHES.items():
+                if name == owner:
+                    continue
+                for match in pattern.finditer(text):
+                    line = text.count("\n", 0, match.start()) + 1
+                    problems.append(f"{path.replace(os.sep, '/')}:{line}: writes {switch} (owner: {owner})")
 
 if problems:
     print("check-single-writers: an owned Attribute is written outside its owner:")
     for p in problems:
         print("  " + p)
     sys.exit(1)
-print(f"check-single-writers: ok ({len(OWNERS)} owned attributes)")
+print(f"check-single-writers: ok ({len(OWNERS)} owned attributes, {len(CLIENT_SWITCHES)} client switches)")

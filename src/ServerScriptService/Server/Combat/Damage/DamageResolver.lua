@@ -151,11 +151,13 @@ function DamageResolver.Resolve(
 		result.HitstunSeconds = hitstunSeconds
 		result.Knockback = profile.Knockback
 		result.Grab = profile.Grab
+		result.Ragdoll = profile.Ragdoll
 	elseif kind == "GuardBroken" then
 		result.Damage = authoredDamage * comboScale
 		result.HitstunSeconds = hitstunSeconds
 		result.Knockback = profile.Knockback
 		result.Grab = profile.Grab
+		result.Ragdoll = profile.Ragdoll
 	elseif kind == "Blocked" then
 		if defenderStateAtContact == "Staggered" then
 			result.Damage = authoredDamage * comboScale * (1 - DefenseConstants.Stagger.MitigationMultiplier)

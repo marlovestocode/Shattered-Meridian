@@ -78,6 +78,8 @@ local RunController = require(script.Parent.Parent.Movement.RunController)
 -- read once a frame into ParkourContext.CombatCommitted. A leaf module with no requires of its own, so
 -- pulling it here cannot form a cycle with the combat clients that write it.
 local LocalCombatState = require(script.Parent.Parent.Combat.LocalCombatState)
+local SettingsStore = require(script.Parent.Parent.Settings.SettingsStore)
+local Types = require(ReplicatedStorage.Shared.Types)
 
 type ParkourContext = ParkourTypes.ParkourContext
 type MovementStateId = ParkourTypes.MovementStateId
@@ -336,8 +338,8 @@ local function onTransition(previousId: MovementStateId, nextId: MovementStateId
 	-- wall-run, a vault or a fall -- before this, the run presentation asked only "is sprint held and
 	-- is the character moving," which is true throughout all four.
 	RunController.SetParkourState(nextId)
+	-- The landing's camera compression is Client/Camera/CameraMotion's, read off the impact itself.
 	if nextId == "Landing" and context.LandingSeverity then
-		ParkourCamera.PlayLanding(context.LandingSeverity)
 		ParkourAudio.PlayLanding(context.LandingSeverity)
 	end
 	logger:trace("Parkour state changed", { from = previousId, to = nextId })
@@ -523,7 +525,6 @@ local function step(deltaTime: number): ()
 	releaseStrandedOwnership(currentHumanoid, machine:GetCurrentDefinition())
 
 	ParkourAnimator.SetMotion(context.Momentum)
-	ParkourCamera.SetSpeed(context.Momentum)
 	-- Tilt belongs to the RUN, not the kick -- Left/Right only, never a Kick* variant. Without this
 	-- guard a departing kick would read "not Left" and tilt as if still leaning into the wall on the
 	-- ordinary (arbitrary) side, right as the character is pushing away from it.
@@ -725,17 +726,29 @@ end
 
 -- Boots the framework. Called from Main.client.lua after CombatClient (which owns sprint and must
 -- already be live to push it) and after the camera composers (FOVOffset/CameraOffsetComposer/
--- CameraShake), whose named slots ParkourCamera composes through.
+-- CameraShake/CameraRotationComposer), whose named slots ParkourCamera composes through.
 function ParkourController.Start(): ()
 	if started then
 		return
 	end
 	started = true
 
+	-- The player's Parkour settings, now and on every change (Client/Settings/SettingsStore).
+	SettingsStore.Observe("Parkour", function(settings: Types.ParkourSettings)
+		ParkourController.SetEnabled(settings.Enabled)
+		ParkourController.SetCameraEffectsEnabled(settings.CameraEffects)
+		ParkourController.SetAssists({
+			CoyoteTime = settings.CoyoteTime,
+			JumpBuffer = settings.JumpBuffer,
+			AutoVault = settings.AutoVault,
+			LedgeAssist = settings.LedgeAssist,
+			StepAssist = settings.StepAssist,
+		})
+	end)
+
 	ParkourNetwork.Start()
 	ParkourNetwork.OnRejected(onActionRejected)
 	ParkourInput.Start()
-	ParkourCamera.Start()
 	ParkourDebug.Start()
 
 	-- See Shared/PlayerLifecycle.lua. BindCharacter keeps its own Humanoid/HumanoidRootPart waits and

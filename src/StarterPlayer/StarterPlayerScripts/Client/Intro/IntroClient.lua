@@ -18,7 +18,7 @@
 	header for why a failure there fails open rather than retrying), and otherwise does not return
 	until the full awakening sequence -- including the greeting banner -- has played out. Main.client.
 	lua calls this before UI.Mount() and falls through to the existing boot sequence unchanged once it
-	returns; camera systems (ShiftLockCamera/FlightCamera/CameraShake) only start after this returns,
+	returns; camera systems (CombatCamera/FlightCamera/CameraShake) only start after this returns,
 	which is what lets Client/Intro/IntroCamera.lua hold Scriptable camera control uncontested for the
 	whole sequence and hand back to Custom cleanly at the end (see that module's own header).
 

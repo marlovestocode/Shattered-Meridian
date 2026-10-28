@@ -119,20 +119,18 @@ local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
-local FrozenBody = require(ReplicatedStorage.Shared.Combat.FrozenBody)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local ProjectileRelevance = require(script.Parent.ProjectileRelevance)
 local SwingSequencer = require(script.Parent.SwingSequencer)
 local AttackCatalog = require(script.Parent.Parent.AttackCatalog)
-local DefaultMoveRegistry = require(script.Parent.Parent.DefaultMoveRegistry)
-local MoveRegistryManager = require(script.Parent.Parent.MoveRegistryManager)
+local MoveContent = require(script.Parent.Parent.MoveContent)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local GrabSystem = require(script.Parent.Parent.Grab.GrabSystem)
@@ -142,6 +140,7 @@ local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 local AdminConfig = require(script.Parent.Parent.Parent.Config.AdminConfig)
 local ArtSystem = require(script.Parent.Parent.Parent.Systems.ArtSystem)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 
 type AttackRequest = AttackTypes.AttackRequest
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
@@ -316,10 +315,7 @@ local function collectClipEntries(): { { MoveId: string, AnimationId: string } }
 			table.insert(entries, { MoveId = moveId, AnimationId = entry.AnimationId })
 		end
 	end
-	for _, move in DefaultMoveRegistry.List() do
-		add(move.MoveId)
-	end
-	for _, move in MoveRegistryManager.List() do
+	for _, move in MoveContent.List() do
 		add(move.MoveId)
 	end
 	return entries
@@ -798,16 +794,16 @@ local function bodyGate(model: Model, now: number): (boolean, string?)
 	-- Deliberately NOT in AttackConstants.Input.TransientRefusals, for the same reason ParkourAction is
 	-- not: a buffered press would fire on the frame the pilot let go of the wheel, which is a free hit
 	-- out of a state the player was not in when they pressed.
-	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
-		return false, "Mounted"
-	end
-
-	-- A FROZEN BODY (an admin freeze, or the onboarding isolation) CANNOT ACT. Frozen only pinned WalkSpeed and the
-	-- parkour client before, so a frozen player could still swing -- the freeze did not hold. Read as an
-	-- Attribute through Shared/Combat/FrozenBody, never a require of AdminActionSystem. Not a transient refusal,
-	-- for the reason Mounted is not: a buffered press would fire the frame the freeze lifted.
-	if FrozenBody.IsFrozen(humanoid) then
-		return false, "Frozen"
+	--
+	-- A FROZEN BODY (an admin freeze, or the onboarding isolation) CANNOT ACT either. Frozen only pinned WalkSpeed and
+	-- the parkour client before, so a frozen player could still swing -- the freeze did not hold. Not a transient
+	-- refusal, for the reason Mounted is not: a buffered press would fire the frame the freeze lifted.
+	--
+	-- Both are BodyRestraint's "Swing" row (Shared/Combat/BodyRestraint.lua): Mounted, then Frozen, the same order and
+	-- reasons this function used to spell out.
+	local restraint = BodyRestraint.Refusal(humanoid, "Swing", now)
+	if restraint then
+		return false, restraint
 	end
 	return true, nil
 end
@@ -1071,6 +1067,9 @@ local function throw(
 	)
 	confirmation.Slot = request.Slot
 	confirmation.PressId = request.PressId
+	-- The lead refund (startedAt is `now` less AttackConstants.Latency): the swing is already this far along.
+	local elapsed = now - startedAt
+	confirmation.ElapsedSeconds = if elapsed > 1e-3 then elapsed else nil
 	sendStarted(model, confirmation)
 
 	debugLog(AttackConstants.Debug.LogAccepted, "Attack thrown", {
@@ -1294,7 +1293,22 @@ function AttackRequestSystem.KeepChainThroughTrade(model: Model, moveId: string,
 	return keepChain(model, moveId, "Traded", resumeAt, resumeAt, at)
 end
 
-local function onDamageApplied(outcome: DefenseTypes.DefenseOutcome, _result: DamageTypes.DamageResult): ()
+-- A STUNNING HIT DROPS THE DEFENDER'S BUFFERED PRESS. That press was aimed at what came after a swing the hit
+-- just cut, or at a moment the stun now owns -- being interrupted costs the exchange, it does not merely delay
+-- it. This used to be implied by Input.BufferSeconds staying shorter than every stun; it is a rule now, so the
+-- buffer could widen (AttackConstants.Input). A press made AFTER the hit, during the stun, still buffers: that
+-- is the stun parry's counter (waitsOutGuard). The client drops its own mirror on the same hit (CancelSwing).
+--
+-- PUBLIC for the spec; production reaches it only through onDamageApplied below.
+function AttackRequestSystem.NoteStunned(model: Model): ()
+	dropBuffered(model, "Dropped")
+end
+
+local function onDamageApplied(outcome: DefenseTypes.DefenseOutcome, result: DamageTypes.DamageResult): ()
+	-- Any stunning hit, whatever delivered it (a shot stuns too); an impact stuns nothing and is left alone.
+	if AttackConstants.HitConfirm.ConfirmKinds[outcome.Kind] and result.HitstunSeconds > 0 then
+		AttackRequestSystem.NoteStunned(outcome.Defender)
+	end
 	-- Both answers below are about the attacker's SWING -- its recovery cut on a landed hit, its string kept
 	-- through a parry. A projectile's contact arrives on its own clock, long after (or during some other)
 	-- swing, so it confirms nothing and keeps nothing; the shot's own parry response was the defence
@@ -1560,12 +1574,8 @@ local function sanitizeRequest(raw: unknown): AttackRequest?
 end
 
 local function handleRequest(player: Player, raw: unknown): ()
-	-- Throttled requests are DROPPED, never buffered: the buffer forgives a mistimed press, it does not
-	-- hand a mashing client a queue.
-	if requestLimiter:IsLimited(player) then
-		return
-	end
-
+	-- Reached only through Endpoint's requestLimiter (see Init). Throttled requests are DROPPED there, never buffered: the
+	-- buffer forgives a mistimed press, it does not hand a mashing client a queue.
 	local request = sanitizeRequest(raw)
 	if not request then
 		return
@@ -1588,11 +1598,8 @@ local function handleRequest(player: Player, raw: unknown): ()
 end
 
 local function handleFeint(player: Player): ()
-	-- Throttled presses are dropped, and so is a refused one: a feint is a now-or-never decision, and
-	-- a buffered feint would fire into whatever the player did next.
-	if feintLimiter:IsLimited(player) then
-		return
-	end
+	-- Throttled presses are dropped (by Endpoint's feintLimiter, see Init), and so is a refused one: a feint is a
+	-- now-or-never decision, and a buffered feint would fire into whatever the player did next.
 	local character = player.Character
 	if not character then
 		return
@@ -1912,23 +1919,24 @@ function AttackRequestSystem.Init(): ()
 	assert(AirComboSystem.CanAttack ~= nil, "AttackRequestSystem.Init() requires AirComboSystem to be available")
 	started = true
 
-	local requestRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Request)
-	requestRemote.OnServerEvent:Connect(handleRequest)
-	startedRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Started)
+	local names = AttackConstants.Network.RemoteNames
+	local endpoint = Endpoint.Scope("AttackRequestSystem", logger)
+	-- The request payload is decoded by sanitizeRequest inside the handler, which owns that shape.
+	endpoint.Event({ Name = names.Request, Limiter = requestLimiter, Handler = handleRequest })
+	startedRemote = endpoint.Push(names.Started)
 
 	-- (Attack_SwapWeapon, the roster-cycling swap key, is gone -- 2026-10-08. No client had sent it since weapons
 	-- became an inventory, and it was still live: an exploited client could cycle into ANY roster weapon, owned or
 	-- not, with no cooldown. Every weapon change a player makes now goes through RequestWeapon.)
-	weaponChangedRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.WeaponChanged)
+	weaponChangedRemote = endpoint.Push(names.WeaponChanged)
 
-	local feintRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Feint)
-	feintRemote.OnServerEvent:Connect(handleFeint)
-	cancelledRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Cancelled)
+	endpoint.Event({ Name = names.Feint, Limiter = feintLimiter, Handler = handleFeint })
+	cancelledRemote = endpoint.Push(names.Cancelled)
 
 	-- Shots in flight, to the clients they concern (Client/FX/ProjectileFX.lua, ProjectileRelevance). The engine has no remote of its own
 	-- by design; this layer, which already tells clients what it threw, tells them what it launched.
-	projectileRemote = NetworkBridge.CreateRemoteEvent(AttackConstants.Network.RemoteNames.Projectile)
-	projectileSyncRemote = NetworkBridge.CreateUnreliableRemoteEvent(AttackConstants.Network.RemoteNames.ProjectileSync)
+	projectileRemote = endpoint.Push(names.Projectile)
+	projectileSyncRemote = endpoint.Push(names.ProjectileSync, { Unreliable = true }) :: any
 	projectileDisconnect = HitboxEngine.OnProjectileEvents(broadcastProjectiles)
 
 	-- A parried swing keeps its chain -- see KeepChainThroughParry. DamageSystem.OnApplied is that layer's

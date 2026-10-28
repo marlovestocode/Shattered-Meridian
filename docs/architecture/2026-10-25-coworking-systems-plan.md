@@ -514,6 +514,88 @@ used to leave. (2) The `AnimationFreezeGuard` timing spec under load: run the su
 `Rig.Dummy` in `Admin`/`WeaponVisual` specs replaced unparented/one-off models with tracked ones; nothing a player sees. No gameplay
 code changed, so no playtest is needed for this spine.
 
+## Status (W6 finished, 2026-10-26)
+
+Scope: the last of W6. Every server remote now goes through `Endpoint`; nothing committed.
+
+- **Handlers converted (42 -> 0 outside Endpoint):** BlimpSystem (5), BoatSystem (4), LiveConsoleSystem (2), KitEditorSystem (10,
+  admin), MoveEditorSystem (15, admin), AttackRequestSystem (Request, Feint), DefenseSystem (SetBlocking), GrabSystem (Throw),
+  DomainSystem (Request -- it was connected through a Trove, which the first count missed).
+- **Push-only remotes moved onto `endpoint.Push`:** Damage, Engagement, EnvironmentReaction (incl. the unreliable cosmetic), Meridian,
+  PlayerDeath, Qi, ResourceGathering, Tier, and every push in the Systems above. `NetworkBridge.Create*` now appears only in
+  Endpoint and ServerHopSystem.
+- **Endpoint extended, not forked:** an Event's `Bound` carries its `Connection`, so DomainSystem's `Stop` still disconnects it.
+- **New buckets where a remote had none** (Endpoint requires one): `BlimpConstants.Network.MaxMountQueryPerSecond` (GetCurrentMount,
+  once per boot), LiveConsole Unsubscribe and MoveEditor SetEditorOpen each on a bucket of their own, so a "stop"/close is never
+  starved by the System's other traffic. Their ceilings are far above a human; the close-exempt intent of both is kept.
+- **Gate:** `scripts/check-endpoints.py` (exempt: Endpoint, ServerHopSystem). Ratchet: bare handlers 73 -> 0.
+- **Lint:** selene 0 errors; the 2 remaining warnings are in `Client/UI/Screens/Inventory/init.lua` (not touched here).
+
+**Not done.** (1) The BootManifest hand lists (`Remotes = namesOf(...)`) are still there. Every remote is now ALSO declared by
+Endpoint, so they are redundant at boot, but `BootManifest.spec` reads them statically (Dev Menu / Move Editor tables "accounted for",
+"one owner") without Initing any System; deleting them needs those cases rewritten to a declared-at-Init form. (2) **Suite not run**:
+Studio was open, and run-in-roblox would have run inside the playtest. Run it with Studio closed; baseline is 3538 / 7.
+(3) Behaviour to check in a playtest: an admin opens/closes the Move Editor (freeze/unfreeze), the F5 console, a blimp mount after
+rejoin (GetCurrentMount), a realm snapshot request after a Stop/Init cycle.
+
+## Status (W17, W13, W21 and W6 close-out, 2026-10-26)
+
+**Suite (ran, Studio closed):** after W6 and again after this pass, 7 failed -- the identical baseline set (feint x2, TrainingBot x5).
+The two new specs (`Shared/PlayerScoped`, `Input/DebugKeys`) pass.
+
+- **W6 close-out, decided:** the BootManifest `Remotes = namesOf(...)` lists STAY. They are derived from Constants tables (not
+  hand-typed), and they are the only record of names a CLIENT waits on; comparing them with Endpoint's declarations is what catches
+  a name nobody creates. The plan's "delete the hand list" step is withdrawn; BootManifest's DeclareRemote comment says why.
+- **W17 PlayerScoped (done, narrowed):** `Shared/PlayerScoped.lua` (`New`, `Adopt`, `Release`, `Count`; the clear is deferred past
+  PlayerRemoving). RateLimiter's buckets are scoped, so every `limiter:Clear(player)` on leave is gone. 25 tables in 18 Systems
+  converted; 15 leave handlers deleted outright, the rest keep only their real work (dismounts, releases, invisibility). LEFT AS
+  EXCEPTIONS (18 tables, the report's ceiling): PlayerDataSystem (its save yields, then reads), Engagement/Rivalry/Bounty/PlayerDeath/
+  KnockbackAudit (their release scrubs the leaver out of OTHER players' rows), LiveConsole subscribers (a counter moves with it),
+  Blimp/Boat mounts (dismount reads them). `WhenProfileReady` was not built: the profile gate is server-only and stays on
+  PlayerDataSystem.
+- **W13 DebugKeys (done):** `Shared/Input/DebugKeys.lua` holds F3/F6/F7; DebugConstants and ParkourConstants read from it;
+  `Clashes()` checks them against each other, `Constants.Keybinds` (F5, F8 live there) and engine keys; asserted by a spec.
+- **W21 cohesion report (done):** `scripts/cohesion-report.py` + `scripts/cohesion-ceilings.json`. Baseline 2026-10-26:
+  typeof_server 228 (target 90), nan_checks 61, bare_remote_handlers 0, raw_input_files 23, shared_render_priority 7,
+  unscoped_player_tables 18, load_animation_bypass 6, spec_rig_builders 0, duplicate_functions 11 (target 4), stale_combatsystem 161.
+  Not yet measured (their foundations do not exist): restraint reads (W9), state slices on private remotes (W7), Blimp/Boat shared lines (W15).
+
+**Not started:** W7-W8 (PlayerState), W9 (BodyRestraint), W10-W11 (frame order, presentation owners), W12 (InputRouter), W14
+(SettingsStore), W15 (vessels), W16 (ContentRegistry), W18 (ClientBootManifest), W19 (Highlight budget). Spines 3, 5, 6 and 7 need a
+playtest to finish; see section 3.
+
+## Status (every remaining spine, 2026-10-27)
+
+**Suite (ran after each spine, Studio closed):** 7 failed every time -- the identical baseline set (feint x2, TrainingBot x5). New
+specs, all passing: `Combat/BodyRestraint`, `Data/ContentRegistry`, `Server/PlayerStateSystem`, `Client/SettingsStore`,
+`Client/FrameOrder`. Gates: selene 0 errors (2 pre-existing Inventory UI warnings), check-endpoints, check-single-writers,
+check-live-project, check-spec-literals, check-client-boot (new), cohesion-report: all pass. Nothing committed.
+
+| W | State | What |
+|---|---|---|
+| W9 BodyRestraint | done | `Shared/Combat/BodyRestraint.lua`, 11 verbs, 12 consumers moved (bodyGate, evade, guard press + remote, RunSystem mirror, HeldElsewhere, AttackInputClient, LockOn, Emote x2, MovementGuard, AirComboSystem); `FrozenBody.lua` deleted. Proven over 512 flag combinations. Matrix + escalations E1-E6: `2026-10-27-body-restraint-matrix.md` |
+| W16 ContentRegistry | done, narrowed | `Server/Data/ContentRegistry.lua` + `Server/Combat/MoveContent.lua`; AttackCatalog, MovePresentationSystem, MoveEditorSystem, AttackRequestSystem moved. Races/bloodlines are one table each and were not bound (escalation C1). `2026-10-27-content-layers.md` |
+| W7 PlayerState | done | `Server/Systems/PlayerStateSystem.lua` (+ `PlayerState_Replay`), 11 slices registered; wire names and payloads unchanged |
+| W8 ClientState only | done for the sheet, inventory, weapons and bounty board | `ClientState.Observe/Latest` cache every slice; CharacterMenuClient, InventoryClient, WeaponInventoryClient and BountyTab read it. `Character_GetSheet` and `Bounty_GetActiveBounties` DELETED. The art catalogue pull stays (it is content, not player state) |
+| W12 InputRouter | done, narrowed | 7 panel toggles + ShiftLock + Grab + Sprint on the router; `InputRouter.BindDebugKey` for F3/F6/F7. Remaining raw sites are named exemptions in cohesion-report (UI gestures, rebind capture, Escape owner, emote wheel, onboarding hold, Move Editor shortcuts, and Blimp/Boat -- which wait on a Vehicle layer with their ButtonA quirk). Flight is still escalation E1 |
+| W13 DebugKeys | done (previous pass) | |
+| W14 SettingsStore | done | `Client/Settings/SettingsStore.lua`; ParkourController, RunController, CameraShake, FOVOffset, BlimpCamera, Analog subscribe themselves; SettingsClient's apply* bodies only publish, and it requires no gameplay module |
+| W15 Vessels | partial | `Server/Vessel/VesselContacts.lua`, `VesselWorldEntry.lua`; Blimp/Boat server shared lines 356 -> 297 (ratchet `vessel_shared_lines` 413 incl. the controllers). The rest is mount bookkeeping keyed on `.Blimp`/`.Boat` record fields; a VesselMountRegistry needs one record shape and a playtest |
+| W17 PlayerScoped | done (previous pass) | |
+| W18 ClientBootManifest | done | `Client/Config/ClientBootManifest.lua` (47 booted, 16 started by owners), `boot()` marks, end of boot logs drift, `scripts/check-client-boot.py`. Order stays in Main.client.lua, as on the server |
+| W19 Highlight budget | done | `Client/FX/HighlightBudget.lua`, cap 24; HitFlash, SwingTellFX, AirComboFX (x2) acquire from it; ratchet `highlight_bypass` = 0 |
+| W10 FrameOrder (client) | done, values unchanged | `Client/Config/FrameOrder.lua`, all 19 bindings read it; 4 known clashes pinned by a spec; separating them is a playtest change (`2026-10-27-frame-order.md`) |
+| W10 ServerTick | not built | escalation in `2026-10-27-frame-order.md`: it would define, not preserve, an order that is connection order today |
+| W11 presentation owners | not built | escalations P1 (CameraRig), P2 (absolute Transform claims), P3 (AnimationManager header is false; three animators bypass it) |
+| W20/W21 | W21 extended | cohesion-report now measures 14 things; `typeof_server` counts runtime checks only (208) |
+
+**REQUIRES PLAYTEST before this branch ships** (nothing here was seen in a running game): join and open the character menu,
+inventory, weapon dock and bounty tab late (W8); every panel toggle key, F3/F6/F7, shift lock, grab throw, sprint hold and toggle
+(W12); every settings toggle in the Settings screen, especially comfort and gamepad (W14); mount, ride, dismount and walk off a blimp
+and a boat, and drag a tagged hull into the world at runtime (W15); a crowded fight with hit flashes, swing tells and an air combo
+(W19); a frozen, grabbed, mounted and flying player trying to swing, guard, evade, emote and lock on (W9 -- the answers should be
+unchanged).
+
 ## Escalations
 
 ### E1. Flight ignores rebinds and has no gamepad path  (W12)

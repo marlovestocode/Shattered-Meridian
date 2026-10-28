@@ -949,7 +949,7 @@ BlimpConstants.Audio = {
 -- while mounted (the left stick -- BlimpSystem.mount sets PlatformStand, and RunSystem pins WalkSpeed
 -- to 0 off AttributeConstants.Mounted) or already gated on that same Attribute by its own consumer
 -- (Client/Parkour/ParkourInput.lua for Slide/Evade/Dash/Leap, Client/Emotes/EmoteWheelClient.lua for
--- the wheel, Client/Camera/ShiftLockCamera.lua for shift lock). That is why this layer needs no
+-- the wheel, Client/Camera/CombatCamera.lua for shift lock). That is why this layer needs no
 -- ContextActionService sink and no suppression switch of its own: nothing it takes was answering.
 --
 -- WHAT IS DELIBERATELY *NOT* HERE, and would each be a real collision if it were:
@@ -1190,6 +1190,8 @@ BlimpConstants.Network = {
 	-- per press is the honest ceiling and this is several times that.
 	MaxSpeedShiftPerSecond = 12,
 	MaxAutopilotTogglePerSecond = 4,
+	-- GetCurrentMount: one call per client boot. Only a ceiling, never a pacing.
+	MaxMountQueryPerSecond = 4,
 	-- A furnace transfer moves a player's ENTIRE carried amount (or the tank's entire contents) in one
 	-- call, so there is nothing to gain from spamming it -- this budget exists purely as the same "every server-mutating
 	-- trigger gets a bucket" defense-in-depth every other remote/prompt handler in this codebase

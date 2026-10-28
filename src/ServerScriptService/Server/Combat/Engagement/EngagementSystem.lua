@@ -117,7 +117,6 @@ local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local EngagementConstants = require(ReplicatedStorage.Shared.Engagement.EngagementConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -125,6 +124,8 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.Parent.Parent.Systems.PlayerStateSystem)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -677,6 +678,12 @@ function EngagementSystem.Attach(): ()
 end
 
 function EngagementSystem.Init(): ()
+	PlayerStateSystem.Register("Engagement", function(player: Player)
+		local remote = changedRemote
+		if remote then
+			remote:FireClient(player, buildPayload(player, os.clock()))
+		end
+	end)
 	if started then
 		return
 	end
@@ -686,7 +693,8 @@ function EngagementSystem.Init(): ()
 	assert(DamageSystem.OnApplied ~= nil, "EngagementSystem.Init() requires DamageSystem to be available")
 	started = true
 
-	changedRemote = NetworkBridge.CreateRemoteEvent(EngagementConstants.Network.RemoteNames.Changed)
+	local endpoint = Endpoint.Scope("EngagementSystem", logger)
+	changedRemote = endpoint.Push(EngagementConstants.Network.RemoteNames.Changed)
 
 	EngagementSystem.Attach()
 

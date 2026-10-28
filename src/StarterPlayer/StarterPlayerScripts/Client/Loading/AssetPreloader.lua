@@ -149,11 +149,12 @@ function AssetPreloader.BuildManifest(): { Instance }
 	for _, instance in CombatAnimator.GetPreloadInstances() do
 		table.insert(raw, instance)
 	end
-	for _, instance in FlightAnimator.GetPreloadInstances() do
-		table.insert(raw, instance)
+	-- Flight and emote clips are claims on Client/FX/LocalAnimator's manager, so they hand back raw ids too.
+	for _, assetId in FlightAnimator.GetPreloadIds() do
+		table.insert(raw, animationFor(assetId))
 	end
-	for _, instance in EmoteAnimator.GetPreloadInstances() do
-		table.insert(raw, instance)
+	for _, assetId in EmoteAnimator.GetPreloadIds() do
+		table.insert(raw, animationFor(assetId))
 	end
 	-- Raw animation ids despite the name, exactly like ParkourAnimator just below -- both resolve
 	-- through Shared/Animation/AnimationManager, which pools its own templates internally and hands

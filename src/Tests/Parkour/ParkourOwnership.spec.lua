@@ -105,12 +105,14 @@ return function()
 		end)
 
 		it("reads every published hold", function()
-			for _, attribute in {
-				AttributeConstants.RootControlLocked,
-				AttributeConstants.Flying,
-				AttributeConstants.Frozen,
-				AttributeConstants.EmoteMovementLocked,
-			} do
+			for _, attribute in
+				{
+					AttributeConstants.RootControlLocked,
+					AttributeConstants.Flying,
+					AttributeConstants.Frozen,
+					AttributeConstants.EmoteMovementLocked,
+				}
+			do
 				local humanoid = freeHumanoid()
 				humanoid:SetAttribute(attribute, true)
 				expect(ParkourOwnership.HeldElsewhere(humanoid, NOW)).to.equal(true, attribute)

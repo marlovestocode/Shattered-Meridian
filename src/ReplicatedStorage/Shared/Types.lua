@@ -751,7 +751,7 @@ export type DevMenuSpawnDummyResult = {
 -- positioning burst (see CombatSystem.lua's handleDashRequest) -- a forward-resolved Dash can also
 -- throw its own DashPunch/DashHit attack (CombatClient.lua's double-tap-W trigger fires the same
 -- request with a flag set). "ShiftLock" toggles the custom shift-lock camera mode (Client/Camera/
--- ShiftLockCamera.lua) -- a camera behavior, not a combat request; it's the one action here that
+-- CombatCamera.lua) -- a camera behavior, not a combat request; it's the one action here that
 -- never fires a remote. "Sprint" is a held neutral-game movement state (start/stop, like Block).
 -- "ToggleWeapon" fires Weapon_ToggleDraw (Server/Combat/Weapon/WeaponInventorySystem.lua) -- draws
 -- the selected weapon, or sheathes it if already out, the same fire-and-forget shape as Dash/Sprint.
@@ -792,6 +792,9 @@ export type KeybindAction =
 	-- Traits + Bloodline Abilities plan, not built yet. Same "client-side convenience toggle,
 	-- admin-only, server re-checks regardless" contract as "OpenMoveEditor" immediately above.
 	| "OpenKitEditor"
+	-- Opens the World Architect (Client/DevTools/WorldArchitect/WorldArchitectClient.lua) -- the admin world-construction
+	-- tool. Same "client-side toggle, admin-only, server re-checks every request" contract as "OpenKitEditor" above.
+	| "OpenWorldArchitect"
 	-- Opens the Live Admin Console (Client/DevTools/LiveConsole/LiveConsoleClient.lua via
 	-- Client/UI/Screens/DevTools/LiveConsole/init.lua) -- a bespoke live log stream, not Roblox's own native
 	-- Developer Console. Binding this key toggles the panel locally for every client (harmless --

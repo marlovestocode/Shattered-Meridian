@@ -47,8 +47,7 @@ local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.Hitb
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 
-local DefaultMoveRegistry = require(script.Parent.DefaultMoveRegistry)
-local MoveRegistryManager = require(script.Parent.MoveRegistryManager)
+local MoveContent = require(script.Parent.MoveContent)
 
 type AttackCatalogEntry = DamageTypes.AttackCatalogEntry
 
@@ -77,18 +76,14 @@ local function warnOnce(signature: string, message: string, data: { [string]: an
 	logger:warn(message, data)
 end
 
--- Resolves a MoveId to an authored move, custom moves taking precedence over Default ones.
+-- Resolves a MoveId to an authored move, custom moves taking precedence over Default ones (MoveContent's layer order).
 --
 -- A custom move sharing an id with a Default one is the more specific intent, so it wins. (The editor
 -- never creates one -- a generated id can never carry the "default:" prefix -- but a spec does, to
 -- stand a custom move in for a weapon stage.) DefaultMoveRegistry.Get composes its override fresh on
 -- every call, so a retuned Default is never stale here either.
 local function resolveMove(moveId: string): MoveTypes.MoveDefinition?
-	local custom = MoveRegistryManager.Get(moveId)
-	if custom then
-		return custom
-	end
-	return DefaultMoveRegistry.Get(moveId)
+	return MoveContent.Get(moveId)
 end
 
 -- A weapon string's Basic stage id, split into everything before the stage number and the number itself --
@@ -227,8 +222,13 @@ buildEntry = function(moveId: string, linkString: boolean): AttackCatalogEntry?
 	-- speed lands that strike on the authored windup, and step 1a below never lets the marker override it.
 	-- Unknown marker (not fetched yet, none authored): the authored timeline stands and the clip plays at
 	-- the weapon's speed, which is only ever cosmetically off.
-	if borrowedFrom then
-		local strike = AttackWindows.WindupOverride(borrowedFrom, animationId)
+	-- A PROJECTILE MOVE IS THE SAME CASE: its authored WindupSeconds is when the volley leaves (the Active
+	-- window opens by launching it), and the Move Editor's Timing tab is the only thing that should move
+	-- that. A "Hit" marker on its clip no longer replaces the windup; it says which frame is the RELEASE, and
+	-- the clip plays at whatever speed puts that frame on the authored windup.
+	local clipFollowsMove = borrowedFrom ~= nil or definition.Projectile ~= nil
+	if clipFollowsMove then
+		local strike = AttackWindows.WindupOverride(borrowedFrom or moveId, animationId)
 		if strike and strike > 0 and definition.WindupSeconds > 0 then
 			playbackSpeed = math.clamp(
 				strike / definition.WindupSeconds,
@@ -262,7 +262,7 @@ buildEntry = function(moveId: string, linkString: boolean): AttackCatalogEntry?
 	-- could push the total below the untouched Cooldown, silently reintroducing dead time after the
 	-- animation finishes where the move still can't be re-thrown. With the length KNOWN the bound is
 	-- unnecessary: the total is the clip's, whatever the marker says, and step 3 clamps Cooldown to it.
-	local windupOverride = if borrowedFrom then nil else AttackWindows.WindupOverride(moveId, animationId)
+	local windupOverride = if clipFollowsMove then nil else AttackWindows.WindupOverride(moveId, animationId)
 	if windupOverride then
 		local overrideSeconds = windupOverride / playbackSpeed
 		if
@@ -280,7 +280,7 @@ buildEntry = function(moveId: string, linkString: boolean): AttackCatalogEntry?
 	-- so a heavy keeps most of its read. With no estimate, nothing changes and step 3 warns as before.
 	if
 		AttackConstants.Windows.RetimeUnfitClips
-		and not borrowedFrom
+		and not clipFollowsMove
 		and not windupOverride
 		and clipLength
 		and clipSeconds

@@ -43,7 +43,6 @@
 	already use.
 ]]
 
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -54,7 +53,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local LiveConsoleModule = require(script.Parent.Parent.Parent.UI.Screens.DevTools.LiveConsole)
-local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Parent.Input.InputRouter)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
 local RemoteInvoker = require(script.Parent.Parent.Parent.Network.RemoteInvoker)
 
@@ -219,16 +218,18 @@ function LiveConsoleClient.Start(deferredHandle: Lazy.Lazy<LiveConsoleHandle>, c
 		unsubscribe()
 	end
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if KeybindManager.Matches("OpenDevConsole", input) then
+	-- The router's System layer: never modal-gated (the panel IS the modal), and the chat-box check stays here.
+	InputRouter.Bind("OpenDevConsole", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
 			local nowOpen = not isOpen
 			setOpen(nowOpen)
 			logger:debug("Live Admin Console toggled", { open = nowOpen })
-		end
-	end)
+		end,
+	})
 
 	logger:info("LiveConsoleClient started")
 end

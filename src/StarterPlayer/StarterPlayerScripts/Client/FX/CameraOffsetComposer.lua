@@ -4,9 +4,9 @@
 
 	Owns: the single canonical writer of the local player's Humanoid.CameraOffset. Before this
 	module existed, two client modules wrote CameraOffset directly and uncoordinated:
-	ShiftLockCamera.lua's over-the-shoulder framing (eased toward Constants.Camera.ShiftLock.
+	CombatCamera.lua's over-the-shoulder framing (eased toward Constants.Camera.ShiftLock.
 	ShoulderOffset or back to zero) and FlightCamera.lua's backward chase pull-back while flying.
-	Each avoided fighting the other only by manually checking a mutual-exclusion flag (ShiftLockCamera
+	Each avoided fighting the other only by manually checking a mutual-exclusion flag (CombatCamera
 	skipping its own write while a "flying" Attribute watch was true; FlightCamera only writing while
 	its own "engaged" was true) -- the same fragile pattern Client/FX/FOVOffset.lua's own header
 	describes for FieldOfView before THAT module existed. Adding a third CameraOffset writer (a future
@@ -27,14 +27,14 @@
 
 	All slots sum onto a Vector3.zero baseline (unlike FOVOffset, which lazily captures a non-zero base
 	FOV some other system may have already set -- no other system in this codebase sets a meaningful
-	baseline CameraOffset independent of ShiftLockCamera/FlightCamera, so there's nothing to preserve
+	baseline CameraOffset independent of CombatCamera/FlightCamera, so there's nothing to preserve
 	here) and are written to humanoid.CameraOffset once per frame for the LOCAL PLAYER's current
 	character, tracked via its own CharacterAdded/CharacterRemoving watch (the same self-contained-watch
-	idiom ShiftLockCamera.lua/FlightCamera.lua already use for their own humanoid references) --
+	idiom CombatCamera.lua/FlightCamera.lua already use for their own humanoid references) --
 	independent of either caller's own character tracking, the same way FOVOffset independently reads
 	Workspace.CurrentCamera rather than relying on a caller to hand it one.
 
-	Does not own: deciding WHEN to offset the camera (ShiftLockCamera/FlightCamera still own that), or
+	Does not own: deciding WHEN to offset the camera (CombatCamera/FlightCamera still own that), or
 	any other camera/Humanoid property (FieldOfView stays FOVOffset's alone; camera rotation stays
 	CameraShake's alone; AutoRotate/WalkSpeed/etc. stay owned exactly where they already are).
 
@@ -66,6 +66,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("CameraOffsetComposer")
 
@@ -156,13 +157,13 @@ end
 -- Binds the render-step compositor and the local player's own character watch. Called once from
 -- Main.client.lua's boot sequence. Idempotent.
 --
--- BOUND JUST BEFORE THE CAMERA SCRIPTS (RenderPriority.Camera - 1), so what it writes is what the default
+-- BOUND JUST BEFORE THE CAMERA SCRIPTS (FrameOrder's CameraOffsetComposer slot), so what it writes is what the default
 -- camera reads in the SAME frame. It used to bind at Camera + 1 -- after the camera had already read the
--- property -- so every offset reached the screen a frame after it was composed. For the callers that set
--- their slots at Camera + 1 or later (ShiftLockCamera, FlightCamera, BlimpCamera, ParkourCamera) nothing
+-- property -- so every offset reached the screen a frame after it was composed. Every caller now sets its slot
+-- earlier in the frame than this (FrameOrder's camera band), so a value set this frame is written this frame -- nothing
 -- changes: a value they set this frame is written at the start of the next one and read by that frame's
 -- camera update, exactly as before. The one caller that needs the same-frame write is
--- Client/Camera/CameraFollow.lua, which sets its trail at Camera - 3 from this frame's root position; a
+-- Client/Camera/CameraFollow.lua, which sets its trail from this frame's root position; a
 -- frame-late trail would be one frame of the body's own motion out of date, which is the very jerk it
 -- exists to remove.
 function CameraOffsetComposer.Start(): ()
@@ -184,7 +185,7 @@ function CameraOffsetComposer.Start(): ()
 		end,
 	})
 
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value - 1, onRenderStep)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("CameraOffsetComposer"), onRenderStep)
 	logger:info("CameraOffsetComposer started")
 end
 

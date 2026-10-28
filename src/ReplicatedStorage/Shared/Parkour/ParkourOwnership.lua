@@ -49,10 +49,9 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAttributes)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
-local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
 local ParkourTypes = require(ReplicatedStorage.Shared.Parkour.ParkourTypes)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 type MovementStateId = ParkourTypes.MovementStateId
 
@@ -113,14 +112,10 @@ end
 --                            carrying the body out anyway, since neither reads WalkSpeed.
 --   * dead                -- nothing drives a corpse.
 -- `now` is the shared server clock DomainRules reads; omit it outside a spec.
+-- BodyRestraint's "Parkour" row (Shared/Combat/BodyRestraint.lua): root locked, flying, frozen, emote-locked, either side of
+-- a live air combo, a realm's Rooted rule (on `now`'s clock), or dead.
 function ParkourOwnership.HeldElsewhere(humanoid: Humanoid, now: number?): boolean
-	return humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
-		or humanoid:GetAttribute(AttributeConstants.Flying) == true
-		or humanoid:GetAttribute(AttributeConstants.Frozen) == true
-		or humanoid:GetAttribute(AttributeConstants.EmoteMovementLocked) == true
-		or AirComboAttributes.IsParticipant(humanoid)
-		or DomainRules.Has(humanoid, "Rooted", now)
-		or humanoid.Health <= 0
+	return BodyRestraint.Restrained(humanoid, "Parkour", now)
 end
 
 return ParkourOwnership

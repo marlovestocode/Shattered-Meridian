@@ -58,10 +58,9 @@ DamageConstants.Hitstun = {
 	--
 	-- The bound that keeps it fair: every hit that causes hitstun was itself avoidable -- blockable,
 	-- parryable, or duckable by spacing -- and the telegraph is the same Windup every attack already
-	-- authors. It is short and fixed, so no chain of them is an infinite stun. And it widens rather than
-	-- threatens AttackConstants.Input.BufferSeconds' own margin below it (0.35): that constant's whole
-	-- job is expiring a press buffered at the moment of being hit rather than firing it the instant
-	-- hitstun clears, and every second this number gains is a second more room for that rule to hold.
+	-- authors. It is short and fixed, so no chain of them is an infinite stun. (It no longer bounds
+	-- AttackConstants.Input.BufferSeconds: a stunning hit drops the defender's buffered press outright --
+	-- AttackRequestSystem.NoteStunned -- so the buffer need not expire inside the stun to keep that rule.)
 	Seconds = 0.65,
 
 	-- PER-STAGE, then PER-WEAPON, OVERRIDES of Seconds -- the same shape and the same "replaces, does not
@@ -76,8 +75,7 @@ DamageConstants.Hitstun = {
 	-- -- a true combo. A jab stunning less than a sword cut is the honest fix: slowing the punches enough to
 	-- open the same gap would make hands slower to throw than their weight suggests, on every press.
 	--
-	-- BOUNDS: every entry must stay above AttackConstants.Input.BufferSeconds (0.35), or a press buffered at
-	-- the moment of being hit fires the instant the stun clears instead of expiring. And the read must stay
+	-- BOUNDS: the read must stay
 	-- SHORTER than the weapon's own M1 windup, so the attacker still wins a straight M1 mash-out on a kept
 	-- rhythm: answering a string is a parry, a block or an evade, not a button race.
 	-- Tests/Combat/Attack/AttackRequestSystem.spec.lua holds every roster weapon's M1 string to a parry read.

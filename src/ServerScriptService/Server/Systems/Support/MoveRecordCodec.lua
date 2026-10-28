@@ -39,6 +39,10 @@
 	optional block a Default move's override carries, and in an override record its ABSENCE is
 	authoritative (see DecodeOverride): the record is the whole overridable set as it was saved.
 
+	RAGDOLL (2026-10-27) is a third optional v3 block, passed through the same way and judged by
+	RagdollTypes.Validate, and the second one an override carries -- its absence in an override record is
+	authoritative too. It is not the retired Knockback.RagdollSeconds, which a v1/v2 record still loses.
+
 	Nothing rewrites a stored record on load. It is re-written in the new shape the next time an admin
 	saves it.
 
@@ -289,6 +293,8 @@ function MoveRecordCodec.DecodeOverride(built: MoveTypes.MoveDefinition, raw: un
 	-- same "the live override wins wholesale" rule every numeric field already follows.
 	if Schema.NumberOr(record.SchemaVersion, 1) >= 3 then
 		candidate.Presentation = record.Presentation
+		-- The ragdoll is the other optional block an override carries (DefaultMoveRegistry's header), by the same rule.
+		candidate.Ragdoll = record.Ragdoll
 	end
 	return candidate, dropped
 end

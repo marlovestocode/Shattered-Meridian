@@ -36,6 +36,7 @@ local EngineLogCapture = require(ReplicatedStorage.Shared.EngineLogCapture)
 
 local FusionTuning = require(script.Parent.UI.FusionTuning)
 local UI = require(script.Parent.UI)
+local ClientBootManifest = require(script.Parent.Config.ClientBootManifest)
 local StartMenuClient = require(script.Parent.StartMenu.StartMenuClient)
 local LoadingClient = require(script.Parent.Loading.LoadingClient)
 local AssetPreloader = require(script.Parent.Loading.AssetPreloader)
@@ -46,12 +47,14 @@ local CombatAnimator = require(script.Parent.FX.CombatAnimator)
 local MovementVFX = require(script.Parent.FX.MovementVFX)
 local EmoteController = require(script.Parent.Emotes.EmoteController)
 local EmoteWheelClient = require(script.Parent.Emotes.EmoteWheelClient)
-local ShiftLockCamera = require(script.Parent.Camera.ShiftLockCamera)
+local CombatCamera = require(script.Parent.Camera.CombatCamera)
 local FlightCamera = require(script.Parent.Camera.FlightCamera)
 local CameraShake = require(script.Parent.FX.CameraShake)
 local FOVOffset = require(script.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.FX.CameraOffsetComposer)
 local CameraFollow = require(script.Parent.Camera.CameraFollow)
+local CameraMotion = require(script.Parent.Camera.CameraMotion)
+local CameraRotationComposer = require(script.Parent.FX.CameraRotationComposer)
 local ParkourController = require(script.Parent.Parkour.ParkourController)
 local RunController = require(script.Parent.Movement.RunController)
 local CharacterMenuClient = require(script.Parent.CharacterMenu.CharacterMenuClient)
@@ -72,7 +75,7 @@ local LockOnController = require(script.Parent.Combat.LockOnController)
 local SwingTracking = require(script.Parent.Combat.SwingTracking)
 local SwingTellFX = require(script.Parent.FX.SwingTellFX)
 local CombatAudio = require(script.Parent.FX.CombatAudio)
-local AttackTrail = require(script.Parent.FX.AttackTrail)
+local SwingTrail = require(script.Parent.FX.SwingTrail)
 local ProjectileFX = require(script.Parent.FX.ProjectileFX)
 local DomainFX = require(script.Parent.FX.DomainFX)
 local RollAfterimage = require(script.Parent.FX.RollAfterimage)
@@ -105,6 +108,8 @@ local function boot(name: string, module: { Start: any }, ...: any): ()
 			errorMessage = tostring(err),
 		})
 	end
+	-- Reached, either way (a failure is already logged above): Config/ClientBootManifest checks the set at the end of boot.
+	ClientBootManifest.MarkBooted(name)
 end
 
 logger:info("Client boot start")
@@ -160,7 +165,7 @@ logger:debug("LoadingClient run end")
 -- exports), black screen, the server's race-keyed teleport, first-person blur/blink reveal, get-up
 -- animation, and the greeting banner -- see that module's own header for why it mounts and tears
 -- down its OWN temporary Fusion scope rather than using UI.Mount()'s session-long one, and why
--- camera systems below (ShiftLockCamera/FlightCamera/CameraShake) starting only after this returns
+-- camera systems below (CombatCamera/FlightCamera/CameraShake) starting only after this returns
 -- is load-bearing for Client/Intro/IntroCamera.lua's own Scriptable-camera handoff.
 logger:debug("IntroClient run start")
 IntroClient.Run()
@@ -196,7 +201,7 @@ PlayerLifecycle.BindLocalCharacter({
 		MovementVFX.BindCharacter(character)
 		RunController.BindCharacter(character)
 		SwingLunge.BindCharacter(character)
-		AttackTrail.BindCharacter(character)
+		SwingTrail.BindCharacter(character)
 	end,
 })
 logger:debug("Character-bind hookup end")
@@ -219,46 +224,54 @@ logger:debug("EmoteWheelClient start")
 boot("EmoteWheelClient", EmoteWheelClient, uiHandles.EmoteWheel, uiHandles.ClientState, uiHandles.Chrome)
 logger:debug("EmoteWheelClient end")
 
--- Before ShiftLockCamera/FlightCamera/CameraShake below: FOVOffset is the single canonical writer
--- of camera.FieldOfView that FlightCamera (started below) composes through -- see that module's own
--- header.
+-- THE CAMERA. The four composers first -- each the single writer of one camera property, composed from named slots --
+-- then the modules that write into them. Every one binds at its own Client/Config/FrameOrder.lua slot, so the boot order
+-- here decides nothing about frame order; it only guarantees no module sets a slot in a composer that has not bound.
+--   FOVOffset              Camera.FieldOfView
+--   CameraOffsetComposer   Humanoid.CameraOffset
+--   CameraShake            transient rotation (an impact's decaying noise)
+--   CameraRotationComposer continuous rotation (a lean, a wall tilt, a blimp's roll and sway, flight's bank)
 logger:debug("FOVOffset start")
 boot("FOVOffset", FOVOffset)
 logger:debug("FOVOffset end")
 
--- Same reasoning as FOVOffset above, for Humanoid.CameraOffset instead of FieldOfView -- the single
--- canonical writer ShiftLockCamera/FlightCamera below both compose through. See that module's header.
 logger:debug("CameraOffsetComposer start")
 boot("CameraOffsetComposer", CameraOffsetComposer)
 logger:debug("CameraOffsetComposer end")
 
--- After CameraOffsetComposer: the smoothed follow writes its trail as one of that composer's slots. See
--- Client/Camera/CameraFollow.lua.
-logger:debug("CameraFollow start")
-boot("CameraFollow", CameraFollow)
-logger:debug("CameraFollow end")
-
-logger:debug("ShiftLockCamera start")
-boot("ShiftLockCamera", ShiftLockCamera, uiHandles.ShiftLockEngaged)
-logger:debug("ShiftLockCamera end")
-
--- Same RenderPriority.Camera + 1 slot as ShiftLockCamera above -- mutually exclusive at runtime
--- (ShiftLockCamera skips its own CameraOffset/yaw writes while Flying is true), never both driving
--- the same frame. See FlightCamera.lua's own header.
-logger:debug("FlightCamera start")
-boot("FlightCamera", FlightCamera)
-logger:debug("FlightCamera end")
-
--- After ShiftLockCamera/FlightCamera: CameraShake composes on top of the final camera pose at
--- RenderPriority.Camera + 2 (after ShiftLock's Camera + 1) -- see CameraShake's header. Both bind at
--- their own priority regardless of call order; keeping the boot order aligned mirrors that intent.
 logger:debug("CameraShake start")
 boot("CameraShake", CameraShake)
 logger:debug("CameraShake end")
 
--- After FOVOffset/CameraOffsetComposer/CameraShake above, whose named slots
--- Client/Parkour/ParkourCamera.lua composes its speed zoom, slide framing, wall-run lean and landing
--- dips through. Starting before those three would mean ParkourCamera writing into compositors that
+logger:debug("CameraRotationComposer start")
+boot("CameraRotationComposer", CameraRotationComposer)
+logger:debug("CameraRotationComposer end")
+
+-- The smoothed follow: the view trailing an accelerating body. See Client/Camera/CameraFollow.lua.
+logger:debug("CameraFollow start")
+boot("CameraFollow", CameraFollow)
+logger:debug("CameraFollow end")
+
+-- The movement-responsive camera: lean, pull-back, speed FOV and landing compression from the root's measured velocity.
+-- After SettingsClient.RestoreSettings, whose Camera effects switch it observes. See Client/Camera/CameraMotion.lua.
+logger:debug("CameraMotion start")
+boot("CameraMotion", CameraMotion)
+logger:debug("CameraMotion end")
+
+-- The combat camera manager: shift lock and lock-on's hold on the view. It drives LockOnController.Step from its own aim
+-- step, so it may start before LockOnController (further down): until that binds its key there is never a target.
+logger:debug("CombatCamera start")
+boot("CombatCamera", CombatCamera, uiHandles.ShiftLockEngaged)
+logger:debug("CombatCamera end")
+
+-- Flight's chase, zoom and bank; never live at once with a vessel mount, and CombatCamera yields while Flying is set.
+logger:debug("FlightCamera start")
+boot("FlightCamera", FlightCamera)
+logger:debug("FlightCamera end")
+
+-- After the camera composers above, whose named slots
+-- Client/Parkour/ParkourCamera.lua composes its slide framing, wall-run tilt and traversal punches
+-- through. Starting before those would mean ParkourCamera writing into compositors that
 -- have not bound their render steps yet -- harmless for a frame, but the ordering is kept explicit
 -- here for the same reason every other entry in this file is.
 --
@@ -337,7 +350,7 @@ logger:debug("AirComboClient end")
 -- Client/Camera/BlimpCamera.lua and Client/FX/BlimpAudio.lua are deliberately NOT started here. Neither
 -- has a Start() at all: both are driven entirely off this module's mount/dismount edges, and the camera
 -- binds its own render step only while somebody is actually aboard rather than for the session -- see
--- its own header on why that differs from FlightCamera/ShiftLockCamera immediately above.
+-- its own header on why that differs from FlightCamera/CombatCamera immediately above.
 logger:debug("BlimpController start")
 boot(
 	"BlimpController",
@@ -393,9 +406,9 @@ logger:debug("SwingLunge end")
 
 -- Same one real dependency as SwingLunge directly above -- AttackInputClient.OnAttackStarted -- and
 -- the same reason for sitting next to it: read as one unit, not because the order is load-bearing.
-logger:debug("AttackTrail start")
-boot("AttackTrail", AttackTrail)
-logger:debug("AttackTrail end")
+logger:debug("SwingTrail start")
+boot("SwingTrail", SwingTrail)
+logger:debug("SwingTrail end")
 
 -- Projectile moves' shots in flight, drawn off Attack_Projectile (AttackRequestSystem creates it at boot,
 -- like every other attack remote). No dependency on anything above; every client draws every shot.
@@ -550,5 +563,12 @@ logger:debug("SettingsClient end")
 logger:debug("FlightController start")
 boot("FlightController", FlightController)
 logger:debug("FlightController end")
+
+-- Every module Config/ClientBootManifest declares must have been reached by now. A name here was dropped from this file or
+-- renamed; its feature is silently absent until it is put back.
+local missingBoots = ClientBootManifest.Missing()
+if #missingBoots > 0 then
+	logger:error("Client boot DRIFTED from Config/ClientBootManifest", { missing = table.concat(missingBoots, ", ") })
+end
 
 logger:info("Client boot end")

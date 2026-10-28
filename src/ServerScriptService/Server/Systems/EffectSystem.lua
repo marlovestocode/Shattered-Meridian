@@ -53,7 +53,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local QiSystem = require(script.Parent.QiSystem)
 
@@ -65,7 +65,8 @@ local EffectSystem = {}
 -- per-player table, never exposed directly" shape QiSystem.lua's own qiStates already establishes;
 -- see GetActiveModifiers below for why every read hands back a copy instead of this table's own
 -- references.
-local playerModifiers: { [Player]: { [string]: Types.ActiveModifier } } = {}
+local playerModifiers: { [Player]: { [string]: Types.ActiveModifier } } =
+	PlayerScoped.New("EffectSystem.playerModifiers")
 
 local function ensureState(player: Player): { [string]: Types.ActiveModifier }
 	local state = playerModifiers[player]
@@ -345,17 +346,12 @@ local function onHeartbeatTick(deltaTime: number): ()
 	EffectSystem.ReclaimExpiredModifiers(os.clock())
 end
 
-local function onPlayerRemoving(player: Player): ()
-	playerModifiers[player] = nil
-end
-
 function EffectSystem.Init(): ()
 	playerModifiers = {}
 	-- Reset alongside the state it sweeps, so an idempotent re-Init cannot inherit a partly-elapsed
 	-- interval from the previous one.
 	secondsSinceReclaim = 0
 
-	PlayerLifecycle.BindAllPlayers({ Scope = "EffectSystem", OnPlayerRemoving = onPlayerRemoving })
 	GameplayEvents.OnHeartbeatTick(onHeartbeatTick)
 
 	logger:info("EffectSystem.Init() complete")

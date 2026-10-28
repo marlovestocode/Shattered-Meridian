@@ -128,6 +128,10 @@ type Window = {
 	authoredDistance: number?,
 	-- Whether the distance still has to be resolved against the target (LockOnConstants.StepIn).
 	resolved: boolean,
+	-- The flat unit bearing to the target, fixed on the step's first frame beside the distance. nil steps
+	-- along the body's facing. The facing is not the aim: under shift lock the body can be off the target
+	-- by the shoulder offset, and a step along it under-closes and drifts sideways.
+	bearing: Vector3?,
 }
 
 local window: Window? = nil
@@ -194,18 +198,23 @@ function SwingLunge.StepInDistance(gapStuds: number?, authoredDistance: number?)
 	return wanted
 end
 
--- The flat gap from `root` to the target a swing thrown now would track, or nil for none.
-local function gapToTarget(root: BasePart): number?
+-- The flat gap from `root` to the target a swing thrown now would track, and the unit flat bearing toward
+-- it, or nil for none.
+local function gapToTarget(root: BasePart): (number?, Vector3?)
 	local targetModel = SwingTracking.PickTarget(root)
 	if targetModel == nil then
-		return nil
+		return nil, nil
 	end
 	local targetRoot = CombatTargets.LiveRoot(targetModel, root.Parent :: Model?)
 	if targetRoot == nil then
-		return nil
+		return nil, nil
 	end
 	local offset = targetRoot.Position - root.Position
-	return Vector3.new(offset.X, 0, offset.Z).Magnitude
+	local flat = Vector3.new(offset.X, 0, offset.Z)
+	if flat.Magnitude < 1e-3 then
+		return flat.Magnitude, nil
+	end
+	return flat.Magnitude, flat.Unit
 end
 
 -- Whether the body is in a state where a forward step is meaningful. ParkourMotor.ApplyImpulse makes
@@ -261,7 +270,7 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 	local delaySeconds = if perKind then perKind.DelaySeconds else -stepIn.LeadSeconds
 	local durationSeconds = if perKind then perKind.DurationSeconds else stepIn.DurationSeconds
 	window = {
-		startsAt = os.clock() + SwingLunge.DelayFor(windupSeconds, delaySeconds),
+		startsAt = AttackInputClient.GetSwingStartedAt() + SwingLunge.DelayFor(windupSeconds, delaySeconds),
 		durationSeconds = durationSeconds,
 		peakSpeed = if perKind then SwingLunge.SpeedAt(perKind.DistanceStuds, durationSeconds, 0) else 0,
 		authoredDistance = if perKind then perKind.DistanceStuds else nil,
@@ -302,11 +311,13 @@ local function onHeartbeat(): ()
 
 	if not live.resolved then
 		live.resolved = true
-		local distance = SwingLunge.StepInDistance(gapToTarget(currentRoot), live.authoredDistance)
+		local gap, bearing = gapToTarget(currentRoot)
+		local distance = SwingLunge.StepInDistance(gap, live.authoredDistance)
 		if distance <= 0 then
 			window = nil
 			return
 		end
+		live.bearing = bearing
 		live.peakSpeed = SwingLunge.SpeedAt(distance, live.durationSeconds, 0)
 	end
 
@@ -316,7 +327,8 @@ local function onHeartbeat(): ()
 	-- carries the step with them instead of sliding sideways out of their own facing. LookVector is
 	-- the body's facing, not the camera's -- the swing's own direction, which is what the server
 	-- resolves the hitbox from too.
-	local forward = ParkourMath.SafeUnit(ParkourMath.Flatten(currentRoot.CFrame.LookVector), Vector3.zero)
+	local forward = live.bearing
+		or ParkourMath.SafeUnit(ParkourMath.Flatten(currentRoot.CFrame.LookVector), Vector3.zero)
 	if forward == Vector3.zero then
 		return
 	end
@@ -359,7 +371,9 @@ function SwingLunge.Start(): ()
 	end)
 	-- One persistent connection, gated on `window` rather than connected per swing: a per-swing
 	-- connection is one respawn away from being leaked, and the idle cost of this one is a nil check.
-	heartbeatConnection = RunService.Heartbeat:Connect(onHeartbeat)
+	-- On PreSimulation like SwingTracking: a Heartbeat write lands after the physics step, a frame late,
+	-- and fights the Humanoid's walk controller for the step.
+	heartbeatConnection = RunService.PreSimulation:Connect(onHeartbeat)
 
 	logger:debug("SwingLunge started", { enabled = AttackConstants.Presentation.SwingLunge.Enabled })
 end

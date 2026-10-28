@@ -75,7 +75,6 @@ local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -93,6 +92,7 @@ local DomainEffects = require(script.Parent.DomainEffects)
 local DomainInstance = require(script.Parent.DomainInstance)
 local DomainWall = require(script.Parent.DomainWall)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 local MovementAllowance = require(script.Parent.Parent.MovementAllowance)
 
 type DomainInstance = DomainInstance.DomainInstance
@@ -1269,10 +1269,8 @@ local function trackCombatant(instance: Instance): ()
 	end
 end
 
+-- Reached only through Endpoint's requestLimiter (see Init).
 local function handleRequest(player: Player): ()
-	if requestLimiter:IsLimited(player) then
-		return
-	end
 	local remote = stateRemote
 	if remote == nil then
 		return
@@ -1292,9 +1290,15 @@ function DomainSystem.Init(): ()
 	end
 	started = true
 
-	stateRemote = NetworkBridge.CreateRemoteEvent(DomainConstants.Network.RemoteNames.State)
-	local requestRemote = NetworkBridge.CreateRemoteEvent(DomainConstants.Network.RemoteNames.Request)
-	trove:Connect(requestRemote.OnServerEvent, handleRequest)
+	local endpoint = Endpoint.Scope("DomainSystem", logger)
+	stateRemote = endpoint.Push(DomainConstants.Network.RemoteNames.State)
+	-- Into the trove, so Stop disconnects it and a later Init does not answer every request twice.
+	local request = endpoint.Event({
+		Name = DomainConstants.Network.RemoteNames.Request,
+		Limiter = requestLimiter,
+		Handler = handleRequest,
+	})
+	trove:Add(request.Connection :: RBXScriptConnection)
 	trove:Connect(Players.PlayerRemoving, function(player: Player)
 		requestLimiter:Clear(player)
 	end)

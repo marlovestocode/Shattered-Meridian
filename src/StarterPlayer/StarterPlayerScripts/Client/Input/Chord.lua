@@ -53,6 +53,7 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local Analog = require(script.Parent.Analog)
+local KeybindManager = require(script.Parent.KeybindManager)
 
 local Chord = {}
 
@@ -83,19 +84,6 @@ local consumedPresses: { [Enum.KeyCode]: Types.KeybindAction } = {}
 -- module away from the thing it works around.
 local heldOverride: boolean? = nil
 
-local function matchesKeybind(keybind: Types.Keybind?, input: InputObject): boolean
-	if not keybind then
-		return false
-	end
-	if keybind.KeyCode then
-		return input.KeyCode == keybind.KeyCode
-	end
-	if keybind.UserInputType then
-		return input.UserInputType == keybind.UserInputType
-	end
-	return false
-end
-
 -- The chord binding currently assigned to `action`, or nil if it has none.
 function Chord.Get(action: Types.KeybindAction): Types.Keybind?
 	return chords[action]
@@ -125,7 +113,7 @@ end
 
 -- True if `input` IS the modifier -- a press the caller must not treat as an action of its own.
 function Chord.IsModifier(input: InputObject): boolean
-	return matchesKeybind(currentModifier, input)
+	return KeybindManager.MatchesKeybind(currentModifier, input)
 end
 
 -- Whether the modifier is physically held RIGHT NOW. The live read that fills Resolve's
@@ -165,7 +153,7 @@ function Chord.Resolve(input: InputObject, modifierHeld: boolean): Resolution
 	end
 
 	for action, keybind in pairs(chords) do
-		if matchesKeybind(keybind, input) then
+		if KeybindManager.MatchesKeybind(keybind, input) then
 			return { Kind = "Chord", Action = action }
 		end
 	end

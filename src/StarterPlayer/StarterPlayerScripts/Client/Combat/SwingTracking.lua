@@ -19,9 +19,9 @@
 	snapping the body back to the camera mid-swing and doing the same thing.
 
 	HOW IT HOLDS THE BODY. For the window it raises the client-only CombatFacingOwned Attribute, which
-	ShiftLockCamera honours by skipping its yaw write (the ParkourFacingOwned pattern), and it turns
-	Humanoid.AutoRotate off so movement does not rotate the body either. Both are put back when the window
-	ends, is cancelled, or the character goes away.
+	CombatCamera honours by skipping its yaw write (the ParkourFacingOwned pattern), and it turns
+	holds a Client/Movement/TurnGate claim so movement does not rotate the body either. Both are released
+	when the window ends, is cancelled, or the character goes away.
 
 	Never turns a body something else already owns: a server root lock, a parkour traversal, a vessel
 	mount, a grab, or the air combo (its follow drives the attacker). Air moves are skipped for that reason.
@@ -47,6 +47,7 @@ local AttackInputClient = require(script.Parent.AttackInputClient)
 local CombatTargets = require(script.Parent.CombatTargets)
 local LocalCombatState = require(script.Parent.LocalCombatState)
 local LockOnController = require(script.Parent.LockOnController)
+local TurnGate = require(script.Parent.Parent.Movement.TurnGate)
 
 type AttackStartedPayload = AttackTypes.AttackStartedPayload
 
@@ -61,8 +62,6 @@ type Window = {
 	-- os.clock() the turning stops (the hit window opens), and the facing hold ends (it closes).
 	TurnEndsAt: number,
 	HoldEndsAt: number,
-	-- The AutoRotate the body had before this window turned it off.
-	RestoreAutoRotate: boolean,
 }
 
 local window: Window? = nil
@@ -75,7 +74,15 @@ local started = false
 -- Whether something else owns this body's rotation right now.
 local function rotationOwnedElsewhere(currentHumanoid: Humanoid): boolean
 	local attributes = AttributeConstants
-	return currentHumanoid:GetAttribute(attributes.RootControlLocked) == true
+	-- A move that locks its own movement (LocksWindup/LocksMovement) holds the root through RootControl's Swing
+	-- claim, and SwingRooted is that claim's mirror. That lock is about translation; tracking is the swing's
+	-- aim, so it must not stand tracking down. Any OTHER claim on the root still does: a stagger, a grab, an
+	-- air-combo hold, a ragdoll. (A swing lock held beside one of those is that swing already cancelled, or
+	-- caught by the Grabbed / air-combo / Ragdolled reads below.)
+	local lockedByOthers = currentHumanoid:GetAttribute(attributes.RootControlLocked) == true
+		and currentHumanoid:GetAttribute(attributes.SwingRooted) ~= true
+	return lockedByOthers
+		or currentHumanoid:GetAttribute(attributes.Ragdolled) == true
 		or currentHumanoid:GetAttribute(attributes.ParkourFacingOwned) == true
 		or currentHumanoid:GetAttribute(attributes.Mounted) == true
 		or currentHumanoid:GetAttribute(attributes.Grabbed) == true
@@ -90,10 +97,7 @@ local function finish(): ()
 		return
 	end
 	LocalCombatState.SetFacingHeld(currentHumanoid, LocalCombatState.FacingOwners.Swing, false)
-	-- Only put AutoRotate back if nothing changed it while this window held it (a shift-lock toggle).
-	if current.RestoreAutoRotate and currentHumanoid.AutoRotate == false then
-		currentHumanoid.AutoRotate = true
-	end
+	TurnGate.Set(currentHumanoid, TurnGate.Owners.SwingTrack, false)
 end
 
 -- The target a swing thrown from `root` right now would track, and whether it is a lock-on target. The
@@ -134,16 +138,16 @@ local function onAttackStarted(payload: AttackStartedPayload): ()
 
 	local windup = if typeof(payload.WindupSeconds) == "number" then payload.WindupSeconds else 0
 	local active = if typeof(payload.ActiveSeconds) == "number" then payload.ActiveSeconds else 0
-	local now = os.clock()
+	-- From the swing's own start, not from this dispatch: an unpredicted swing arrives up to MaxLeadSeconds late.
+	local now = AttackInputClient.GetSwingStartedAt()
 	window = {
 		Target = targetModel,
 		TurnRate = if locked then tuning.LockedTurnDegreesPerSecond else tuning.AssistTurnDegreesPerSecond,
 		TurnEndsAt = now + windup + tuning.StopAfterWindupSeconds,
 		HoldEndsAt = now + windup + active,
-		RestoreAutoRotate = currentHumanoid.AutoRotate,
 	}
 	LocalCombatState.SetFacingHeld(currentHumanoid, LocalCombatState.FacingOwners.Swing, true)
-	currentHumanoid.AutoRotate = false
+	TurnGate.Set(currentHumanoid, TurnGate.Owners.SwingTrack, true)
 end
 
 -- Runs on PreSimulation, BEFORE this frame's physics step, not on Heartbeat after it. A Heartbeat write

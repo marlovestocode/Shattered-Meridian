@@ -5,14 +5,14 @@
 	Owns: camera feel while the LOCAL player's own Humanoid has "Flying" true -- FOV widening with
 	speed, a backward CameraOffset chase pull-back, and an optional camera roll matching the
 	character's own bank angle (Constants.Camera.Flight.BankRollFraction, 0 disables it outright).
-	A sibling to Client/Camera/ShiftLockCamera.lua, independently watching its own bound character's
+	A sibling to Client/Camera/CombatCamera.lua, independently watching its own bound character's
 	"Flying" Attribute for engage/disengage (same self-contained-watch idiom that module already uses
 	for "RootControlLocked") -- Client/Flight/FlightController.lua never calls an explicit Stop()
 	here, it just flips the Attribute and this module reacts on its own.
 
 	Also owns: LocalPlayer.DevCameraOcclusionMode for the engaged duration. CameraType stays Custom
 	throughout (this module only ever nudges CameraOffset/FOV/roll on top of Roblox's own follow-cam,
-	same as ShiftLockCamera.lua) -- but the stock camera's default occlusion mode (Zoom) fights Noclip
+	same as CombatCamera.lua) -- but the stock camera's default occlusion mode (Zoom) fights Noclip
 	flight specifically: Noclip is a raw CFrame write that bypasses collision entirely (Client/DevTools/DevMenu/
 	FlightController.lua's own header), yet the default camera still tries to avoid clipping through
 	whatever the character is now flying through, yanking itself toward the character the instant a
@@ -21,11 +21,11 @@
 	locally instead of moving the camera) removes that fight entirely while flying, without needing to
 	take over CameraType and reimplement the default camera's mouse-orbit/zoom from scratch.
 
-	Binds at the SAME Enum.RenderPriority.Camera.Value + 1 slot ShiftLockCamera.lua uses for its own
-	yaw write -- safe specifically because ShiftLockCamera.lua skips its yaw write while Flying is
-	true (see that file's own `flying` guard). Client/FX/CameraShake.lua's Camera+2 composition needs
-	no change: it already layers on top of whatever Camera+1 produced, so the hard-landing shake
-	"just works" regardless of which of the two modules drove that frame's Camera+1 pass.
+	Binds at its own FrameOrder slot ("FlightCamera"), BEFORE the composers write, so its chase and zoom reach
+	the screen on the frame they are computed (it sat at Camera + 1 until 2026-10-27, a frame behind). The bank roll goes
+	through Client/FX/CameraRotationComposer.lua's "Flight" slot rather than a direct Camera.CFrame multiply, so it is
+	taken back off before the next frame's camera update like every other continuous rotation. CombatCamera yields its
+	shoulder and yaw while Flying is set, so the two never drive the same frame.
 
 	The FieldOfView write itself goes through Client/FX/FOVOffset.lua (a named "Flight" continuous
 	slot) rather than a direct camera.FieldOfView write -- see that module's header for why: this
@@ -57,10 +57,13 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
 local CameraOffsetComposer = require(script.Parent.Parent.FX.CameraOffsetComposer)
+local CameraRotationComposer = require(script.Parent.Parent.FX.CameraRotationComposer)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("FlightCamera")
 
 local RENDER_STEP_NAME = "FlightCameraUpdate"
+local SLOT = "Flight"
 
 local FlightCamera = {}
 
@@ -91,8 +94,9 @@ local function setEngaged(nowEngaged: boolean, camera: Camera?): ()
 	if not engaged then
 		currentFovDelta = 0
 		currentChaseOffset = 0
-		CameraOffsetComposer.ClearContinuous("Flight")
-		FOVOffset.ClearContinuous("Flight")
+		CameraOffsetComposer.ClearContinuous(SLOT)
+		FOVOffset.ClearContinuous(SLOT)
+		CameraRotationComposer.ClearContinuous(SLOT)
 		localPlayer.DevCameraOcclusionMode = savedOcclusionMode
 	end
 	logger:debug("Flight camera engagement changed", { engaged = engaged })
@@ -119,19 +123,18 @@ local function onRenderStep(deltaTime: number): ()
 	currentFovDelta += (targetFovDelta - currentFovDelta) * alphaFov
 	-- Already eased above -- hand FOVOffset the final value with no easeSpeed of its own (nil means
 	-- "snap to this," not "ease toward this," avoiding a double-ease).
-	FOVOffset.SetContinuous("Flight", currentFovDelta)
+	FOVOffset.SetContinuous(SLOT, currentFovDelta)
 
 	local targetChaseOffset = currentSpeedFraction * cfg.ChasePullBackMaxStuds
 	currentChaseOffset += (targetChaseOffset - currentChaseOffset) * alphaChase
-	-- +Z is backward in Humanoid.CameraOffset's local space (matches ShiftLockCamera.lua's own
+	-- +Z is backward in Humanoid.CameraOffset's local space (matches CombatCamera.lua's own
 	-- ShoulderOffset convention, X=right/Y=up/Z=back) -- Studio-verify the sign reads as a pull-back,
 	-- not a push-in, once real flight is playtested. Already eased above -- same "hand over the
 	-- final value, no easeSpeed of its own" reasoning as FOVOffset.SetContinuous just above.
-	CameraOffsetComposer.SetContinuous("Flight", Vector3.new(0, 0, currentChaseOffset))
+	CameraOffsetComposer.SetContinuous(SLOT, Vector3.new(0, 0, currentChaseOffset))
 
-	if cfg.BankRollFraction ~= 0 then
-		camera.CFrame = camera.CFrame * CFrame.Angles(0, 0, currentBankRadians * cfg.BankRollFraction)
-	end
+	-- The character's own bank, mirrored by a fraction (0 turns it off). Already eased by FlightController's bank.
+	CameraRotationComposer.SetContinuous(SLOT, Vector3.new(0, 0, currentBankRadians * cfg.BankRollFraction), nil)
 end
 
 -- Called every Heartbeat by FlightController.lua's stepFlight. `_pitchAngleRadians` isn't read yet
@@ -160,11 +163,11 @@ function FlightCamera.Start(): ()
 		end,
 		OnCharacterRemoving = function()
 			humanoid = nil
-			engaged = false
+			setEngaged(false, nil)
 		end,
 	})
 
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("FlightCamera"), onRenderStep)
 	logger:info("FlightCamera started")
 end
 

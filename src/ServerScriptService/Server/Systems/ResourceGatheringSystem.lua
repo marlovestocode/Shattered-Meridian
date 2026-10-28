@@ -41,13 +41,13 @@ local Workspace = game:GetService("Workspace")
 
 local GatheringConstants = require(ReplicatedStorage.Shared.Gathering.GatheringConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
 local InventorySystem = require(script.Parent.InventorySystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("ResourceGatheringSystem")
 
@@ -287,7 +287,8 @@ function ResourceGatheringSystem.SpawnDebugNode(kind: GatheringConstants.Resourc
 end
 
 function ResourceGatheringSystem.Init(): ()
-	carriedFuelUpdatedRemote = NetworkBridge.CreateRemoteEvent(GatheringConstants.RemoteNames.CarriedFuelUpdated)
+	local endpoint = Endpoint.Scope("ResourceGatheringSystem", logger)
+	carriedFuelUpdatedRemote = endpoint.Push(GatheringConstants.RemoteNames.CarriedFuelUpdated)
 
 	watchTag(GatheringConstants.Tags.CoalDeposit, "Coal")
 	watchTag(GatheringConstants.Tags.WaterSource, "Water")

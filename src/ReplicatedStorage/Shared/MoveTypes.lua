@@ -35,6 +35,10 @@
 	    presence is not: a realm move casts VOLUMELESS (HitboxTypes.AttackDefinition.Volumeless), so the
 	    swing keeps its whole lifecycle and samples nothing in front of the caster -- the realm, and the
 	    strikes it delivers, are the move's only hits. AttackCatalog also surfaces the presence (IsDomain).
+	  * Ragdoll (2026-10-27) -- what a landed hit does to the body as a physical thing (Shared/Ragdoll/
+	    RagdollTypes.lua). Rides the damage profile beside Knockback; DamageSystem decides from it whether a
+	    hit ragdolls and Server/Combat/Ragdoll/RagdollSystem runs the rig. The one gameplay block a Default
+	    move's override may also carry (DefaultMoveRegistry), so ANY move can put a body down.
 	  * Presentation (2026-09-30) -- what the move sounds and looks like at a fixed set of moments
 	    (Shared/Combat/MovePresentationTypes.lua). The one block no server system reads: it is carried,
 	    validated, persisted and replicated to clients, and deliberately absent from
@@ -60,6 +64,7 @@ local GrabTypes = require(ReplicatedStorage.Shared.Grab.GrabTypes)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
+local RagdollTypes = require(ReplicatedStorage.Shared.Ragdoll.RagdollTypes)
 
 local MoveTypes = {}
 
@@ -190,6 +195,9 @@ export type MovePresentation = MovePresentationTypes.Presentation
 -- The realm the move opens -- see DomainTypes' header for every field.
 export type MoveDomainConfig = DomainTypes.DomainSpec
 
+-- What a landed hit does to the body as a physical thing -- see RagdollTypes' header for every field.
+export type MoveRagdoll = RagdollTypes.RagdollSpec
+
 export type MoveDefinition = {
 	-- Identity. MoveId is server-assigned once and immutable; Author/CreatedAt/UpdatedAt are stamped from
 	-- trusted server context on every write (MoveEditorSystem), never taken from a client.
@@ -256,6 +264,8 @@ export type MoveDefinition = {
 	Presentation: MovePresentation?,
 	-- Present = the move opens a realm when its swing is accepted (MoveTypes.IsDomain).
 	Domain: MoveDomainConfig?,
+	-- Present = a landed hit may ragdoll its target (on the outcomes its Trigger names).
+	Ragdoll: MoveRagdoll?,
 
 	-- Projected-only (see this file's header). Never authored, never on the wire, never persisted.
 	SizeMultiplier: number?,
@@ -274,6 +284,8 @@ export type DamageProfile = {
 	PostureDamage: number,
 	Knockback: MoveKnockback?,
 	Grab: MoveGrabConfig?,
+	-- The authored block, unresolved: DamageSystem decides per contact whether it fires (RagdollRules.Resolve).
+	Ragdoll: MoveRagdoll?,
 	-- Projected from MoveDefinition.HitstunSeconds. nil = DamageConstants.Hitstun.Seconds.
 	HitstunSeconds: number?,
 }
@@ -326,6 +338,7 @@ function MoveTypes.Clone(move: MoveDefinition): MoveDefinition
 		Projectile = if move.Projectile then ProjectileTypes.Copy(move.Projectile) else nil,
 		Presentation = if move.Presentation then MovePresentationTypes.Copy(move.Presentation) else nil,
 		Domain = if move.Domain then DomainTypes.Copy(move.Domain) else nil,
+		Ragdoll = if move.Ragdoll then RagdollTypes.Copy(move.Ragdoll) else nil,
 
 		SizeMultiplier = move.SizeMultiplier,
 		SpawnDelaySeconds = move.SpawnDelaySeconds,
@@ -426,6 +439,10 @@ function MoveTypes.ToWire(move: MoveDefinition): MoveWire
 	if move.Domain then
 		-- Numbers, strings, booleans and three arrays of the same -- the block's own copy is its encoding.
 		wire.Domain = DomainTypes.Copy(move.Domain)
+	end
+	if move.Ragdoll then
+		-- Numbers, one string and one boolean: the block's own copy is its flat encoding.
+		wire.Ragdoll = RagdollTypes.Copy(move.Ragdoll)
 	end
 	return wire
 end
@@ -568,6 +585,7 @@ function MoveTypes.ToEngineAttackDefinition(move: MoveDefinition): (HitboxTypes.
 		PostureDamage = move.PostureDamage,
 		Knockback = move.Knockback,
 		Grab = move.Grab,
+		Ragdoll = move.Ragdoll,
 		HitstunSeconds = move.HitstunSeconds,
 	}
 	return definition, profile

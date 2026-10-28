@@ -143,4 +143,51 @@ return function()
 			end
 		)
 	end)
+
+	describe("FlightMath.SpringAdvance", function()
+		it("settles on its target", function()
+			local value, velocity = 0, 0
+			for _ = 1, 240 do
+				value, velocity = FlightMath.SpringAdvance(value, velocity, 1, 10, 0.8, 1 / 60)
+			end
+			expect(value).to.be.near(1, 1e-3)
+			expect(math.abs(velocity) < 1e-3).to.equal(true)
+		end)
+
+		it("gives the same curve at 30, 60, 144 and 240 fps", function()
+			-- A sixth of a second is a whole number of frames at all four rates.
+			local function valueAfter(fps: number): number
+				local value, velocity = 0, 0
+				for _ = 1, fps / 6 do
+					value, velocity = FlightMath.SpringAdvance(value, velocity, 1, 10, 0.8, 1 / fps)
+				end
+				return value
+			end
+			local reference = valueAfter(240)
+			for _, fps in { 30, 60, 144 } do
+				expect(math.abs(valueAfter(fps) - reference) < 0.04).to.equal(true)
+			end
+		end)
+
+		it("stays finite across a frame that took a full second", function()
+			local value, velocity = FlightMath.SpringAdvance(0, 5, 1, 13, 0.55, 1)
+			expect(math.abs(value) < 10).to.equal(true)
+			expect(math.abs(velocity) < 100).to.equal(true)
+		end)
+	end)
+
+	describe("FlightMath.SpringPeakFactor", function()
+		it("predicts the peak of a spring kicked from rest", function()
+			for _, damping in { 0.4, 0.55, 0.8, 1, 1.5 } do
+				local factor = FlightMath.SpringPeakFactor(13, damping)
+				local value, velocity, peak = 0, 2, 0
+				for _ = 1, 480 do
+					value, velocity = FlightMath.SpringAdvance(value, velocity, 0, 13, damping, 1 / 240)
+					peak = math.max(peak, value)
+				end
+				-- Implicit Euler damps a little more than the analytic spring; within a tenth is the same landing.
+				expect(math.abs(peak / 2 - factor) / factor < 0.1).to.equal(true)
+			end
+		end)
+	end)
 end

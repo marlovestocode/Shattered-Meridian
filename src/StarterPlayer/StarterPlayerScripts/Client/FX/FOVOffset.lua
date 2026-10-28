@@ -33,7 +33,7 @@
 	FieldOfView directly again.
 
 	Does not own: deciding WHEN to punch/zoom (SwingEffect/FlightCamera/CombatClient's Sprint-Slide
-	code still own that), or any other camera property (CameraOffset stays ShiftLockCamera/
+	code still own that), or any other camera property (CameraOffset stays CombatCamera/
 	FlightCamera's alone; camera rotation stays CameraShake's alone).
 ]]
 
@@ -42,6 +42,9 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local SettingsStore = require(script.Parent.Parent.Settings.SettingsStore)
+local Types = require(ReplicatedStorage.Shared.Types)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("FOVOffset")
 
@@ -215,16 +218,17 @@ local function onRenderStep(deltaTime: number): ()
 end
 
 -- Binds the render-step compositor. Called once from Main.client.lua's boot sequence. Idempotent.
--- Binds at the same Enum.RenderPriority.Camera.Value + 1 slot ShiftLockCamera/FlightCamera use for
--- CameraOffset -- a different property (FieldOfView, not CameraOffset), so there's no ordering
--- hazard sharing it. CameraShake.lua's own Camera + 2 rotation composition is unaffected -- it
--- never touches FieldOfView.
+-- Binds at its own FrameOrder slot, after the camera scripts and after every caller that sets a slot, so a value
+-- set this frame is written this frame. No other camera writer touches FieldOfView.
 function FOVOffset.Start(): ()
 	if started then
 		return
 	end
 	started = true
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
+	SettingsStore.Observe("Comfort", function(comfort: Types.ComfortSettings)
+		FOVOffset.SetPunchesEnabled(comfort.FieldOfViewEffects)
+	end)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("FOVOffset"), onRenderStep)
 	logger:info("FOVOffset started")
 end
 

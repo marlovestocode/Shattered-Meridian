@@ -457,7 +457,7 @@ return function()
 
 	describe("DamageSystem -- a clash", function()
 		it("cancels both swings and hurts nobody, symmetrically", function()
-			-- Two Clean hits on each other in one batch are ONE exchange (DefenseConstants.Clash), resolved
+			-- Two Clean hits on each other at the same instant are ONE exchange (DefenseConstants.Clash), resolved
 			-- as a Trade. This used to be a double hit -- both stunned, both damaged -- and anything a frame
 			-- apart went to whoever the server heard first. Neither side wins a clash: both lose the swing,
 			-- neither takes a hit.
@@ -570,6 +570,49 @@ return function()
 			step(FRAME, base + FRAME)
 
 			expect(defender.Humanoid.Health < 100).to.equal(true)
+		end)
+	end)
+
+	-- DefenseConstants.Clash, "THE EARLIER HIT WINS": outside the clash window, the first hit cancels the other swing
+	-- completely (DefenseSystem.cutByEarlierHit).
+	describe("DamageSystem -- an earlier hit", function()
+		it("clashes two hits that land at the same instant: neither is damaged", function()
+			-- The same-moment half of the rule, pinned beside the earlier-hit cases it is the exception to.
+			local base = os.clock()
+			local alpha = spawnDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local beta = spawnDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(alpha.Id, makeDefinition(), 1, 1)
+			HitboxEngine.RequestAttack(beta.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+
+			expect(alpha.Humanoid.Health).to.be.near(100, 1e-3)
+			expect(beta.Humanoid.Health).to.be.near(100, 1e-3)
+		end)
+
+		it("cancels the later swing, no damage from it, while the earlier hit sits in a rewind hold", function()
+			-- Beta has a round trip and is free when Alpha's hit lands, so that hit waits in the rewind hold for a
+			-- press. Beta swings instead, and its blade reaches Alpha inside the hold. Before the rule, Beta's hit
+			-- applied at once and Alpha's after it: both damaged, the later swing winning the race it lost.
+			DefenseSystem.SetPingResolver(function(): number
+				return 0.1
+			end)
+			local base = os.clock()
+			local alpha = spawnDummy("Alpha", Vector3.new(0, 5, 0), Vector3.new(0, 5, -4))
+			local beta = spawnDummy("Beta", Vector3.new(0, 5, -4), Vector3.new(0, 5, 0))
+
+			HitboxEngine.RequestAttack(alpha.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + FRAME)
+			expect(beta.Humanoid.Health).to.be.near(100, 1e-3)
+
+			HitboxEngine.RequestAttack(beta.Id, makeDefinition(), 1, 1)
+			step(FRAME, base + 2 * FRAME)
+
+			expect(beta.Humanoid.Health < 100).to.equal(true)
+			expect(DamageSystem.IsHitstunned(beta.Model, base + 2 * FRAME)).to.equal(true)
+			expect(HitboxEngine.GetAttackState(beta.Id)).to.equal("Idle")
+			expect(alpha.Humanoid.Health).to.be.near(100, 1e-3)
+			expect(DamageSystem.IsHitstunned(alpha.Model, base + 2 * FRAME)).to.equal(false)
 		end)
 	end)
 

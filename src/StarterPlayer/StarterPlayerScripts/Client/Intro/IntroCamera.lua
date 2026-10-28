@@ -19,10 +19,10 @@
 	each stage, not when to move to the next one.
 
 	CameraOffsetComposer.lua/FOVOffset.lua (the game's other camera-property composers) are
-	deliberately NOT involved here: those exist to let ShiftLockCamera/FlightCamera/CameraShake
+	deliberately NOT involved here: those exist to let CombatCamera/FlightCamera/CameraShake
 	compose non-conflicting offsets onto ONE live Custom-mode camera during normal gameplay. This
 	module runs entirely BEFORE any of those three ever start (Main.client.lua calls
-	Client/Intro/IntroClient.Run() before ShiftLockCamera.Start()/FlightCamera.Start()/CameraShake.
+	Client/Intro/IntroClient.Run() before CombatCamera.Start()/FlightCamera.Start()/CameraShake.
 	Start()), driving a fully Scriptable camera with no other writer to coordinate with -- there is
 	nothing to compose.
 
@@ -215,7 +215,7 @@ function IntroCamera.BeginGetUpFollow(player: Player, durationSeconds: number): 
 end
 
 -- Hands the camera back to Custom -- the terminal call, once the whole awakening beat (including the
--- get-up follow above) is over. Client/Camera/ShiftLockCamera.lua/Client/Camera/FlightCamera.lua only
+-- get-up follow above) is over. Client/Camera/CombatCamera.lua/Client/Camera/FlightCamera.lua only
 -- start (Main.client.lua's boot order) after Client/Intro/IntroClient.Run() returns, which is only
 -- after this has already run, so there's no window where they'd fight this module for CameraType.
 function IntroCamera.Release(): ()

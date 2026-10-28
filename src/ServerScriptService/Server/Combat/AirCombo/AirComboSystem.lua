@@ -51,6 +51,7 @@ local Invulnerability = require(ReplicatedStorage.Shared.Combat.Invulnerability)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local AirComboMachine = require(script.Parent.AirComboMachine)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
@@ -405,10 +406,9 @@ end
 
 -- Launch -------------------------------------------------------------------------------------------
 
+-- BodyRestraint's "Launch" row: grabbed, holding a grab, or mounted.
 local function isRestrained(humanoid: Humanoid): boolean
-	return humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
-		or humanoid:GetAttribute(ATTRIBUTES.Grabbing) == true
-		or humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
+	return BodyRestraint.Restrained(humanoid, "Launch")
 end
 
 local function isLaunchImmune(humanoid: Humanoid): boolean

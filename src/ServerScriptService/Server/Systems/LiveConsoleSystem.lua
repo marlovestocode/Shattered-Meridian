@@ -3,9 +3,9 @@
 	LiveConsoleSystem.lua
 
 	Owns: authorization + rate-limiting, and every Constants.LiveConsole.RemoteNames remote, for the
-	Live Admin Console (F5). checkLiveConsolePreconditions is a thin wrapper over
-	Server/Network/AdminGate.Check (auth + rate limit), with its own dedicated RateLimiter bucket
-	passed in -- see AdminGate.lua's own header for why it never constructs or defaults one itself.
+	Live Admin Console (F5). Subscribe is an admin Server/Network/Endpoint (AdminGate's auth + rate
+	limit, with this System's own dedicated RateLimiter bucket -- see AdminGate.lua's own header for why
+	it never constructs or defaults one itself).
 
 	The one real difference from every other admin-tooling System in this codebase: this one exists
 	specifically to keep working in a live server, streaming this server's own real-time log
@@ -19,8 +19,8 @@
 	a freshly-opened console -- fired by Client/DevTools/LiveConsole/LiveConsoleClient.lua the moment the
 	panel actually opens, not eagerly at boot, so the snapshot it returns is never stale from having
 	sat in a closed panel. Unsubscribe (RemoteEvent, fire-and-forget) stops this System from pushing
-	to a player whose panel just closed -- no precondition check, matching RateLimiter.lua's own
-	guidance that a "stop" action should never be blocked. Stream (RemoteEvent) is this System's own
+	to a player whose panel just closed -- no admin check, and a bucket of its own that nothing else
+	draws on, matching RateLimiter.lua's own guidance that a "stop" action should never be blocked. Stream (RemoteEvent) is this System's own
 	batched push to current subscribers only -- see flushPendingBatch below -- NEVER FireAllClients:
 	a live log line can carry information (player names, internal state, error text) that has no
 	business reaching a non-admin, the same reasoning every other admin-only remote in this codebase
@@ -32,14 +32,12 @@
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
-local AdminGate = require(script.Parent.Parent.Network.AdminGate)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local LiveConsoleSystem = {}
 
@@ -50,12 +48,9 @@ local Config = Constants.LiveConsole
 -- Own bucket, separate from DevMenuSystem's/MoveEditorSystem's -- see DevMenuSystem.lua's own
 -- rateLimiter comment for why every dev-tool domain gets its own budget.
 local rateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
-
--- Shared auth + rate-limit precondition -- Server/Network/AdminGate.lua's own Check, the module
--- this used to hand-duplicate (see that module's header).
-local function checkLiveConsolePreconditions(player: Player, actionName: string): (boolean, string?)
-	return AdminGate.Check(player, actionName, rateLimiter)
-end
+-- Unsubscribe's own bucket, never shared with Subscribe: a "stop" must not be starved by the call that started it. It exists only
+-- because every public remote has one; a genuine close is one call.
+local unsubscribeRateLimiter = RateLimiter.New(Constants.NetworkBudget.MaxRemoteCallsPerSecondPerPlayer)
 
 -- Currently-open admin consoles this server should push new entries to -- populated by Subscribe,
 -- cleared by Unsubscribe and by Players.PlayerRemoving. A player can be authorized without being a
@@ -105,13 +100,9 @@ local function syncCaptureLevel(): ()
 	end
 end
 
+-- Reached only through Endpoint's admin gate (see Init): an unauthorized or rate-limited caller is answered by Denied there.
 local function handleSubscribe(player: Player): Types.LiveConsoleSubscribeResult
 	logger:debug("Subscribe received", { player = player.Name, userId = player.UserId })
-
-	local allowed, reason = checkLiveConsolePreconditions(player, "Subscribe")
-	if not allowed then
-		return { Success = false, Reason = reason :: string }
-	end
 
 	if not subscribers[player] then
 		subscribers[player] = true
@@ -125,7 +116,7 @@ local function handleSubscribe(player: Player): Types.LiveConsoleSubscribeResult
 	return { Success = true, Snapshot = Logger.GetBufferSnapshot() }
 end
 
--- Deliberately still free of the authorization/rate-limit gate every other entry point here carries,
+-- Deliberately still free of the authorization gate Subscribe carries, and on a bucket of its own,
 -- per this file's header and RateLimiter.lua's own guidance that a "stop" action must never be
 -- blocked -- an admin whose console is stuck subscribed because their Unsubscribe was throttled is a
 -- worse outcome than an unauthorized player toggling a table entry that was already nil.
@@ -188,26 +179,25 @@ local function flushPendingBatch(streamRemote: RemoteEvent): ()
 end
 
 function LiveConsoleSystem.Init(): ()
-	local subscribeRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.Subscribe)
-	-- Through Shared/RemoteHandler.WrapInvoke rather than a hand-rolled pcall: this was the one
-	-- OnServerInvoke in the tree still writing that boundary out inline, with no comment claiming a
-	-- reason. Same catch, same log line, same fallback result.
-	subscribeRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"Subscribe",
-		{ Success = false, Reason = "InternalError" } :: Types.LiveConsoleSubscribeResult,
-		handleSubscribe
-	)
+	local endpoint = Endpoint.Scope("LiveConsoleSystem", logger)
+	endpoint.Function({
+		Name = Config.RemoteNames.Subscribe,
+		Limiter = rateLimiter,
+		Admin = true,
+		ErrorResult = { Success = false, Reason = "InternalError" } :: Types.LiveConsoleSubscribeResult,
+		Denied = function(reason: string): Types.LiveConsoleSubscribeResult
+			return { Success = false, Reason = reason }
+		end,
+		Handler = handleSubscribe,
+	})
 
-	local unsubscribeRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.Unsubscribe)
-	unsubscribeRemote.OnServerEvent:Connect(function(player: Player)
-		local ok, errorMessage = pcall(handleUnsubscribe, player)
-		if not ok then
-			logger:error("Unsubscribe handler errored", { player = player.Name, errorMessage = tostring(errorMessage) })
-		end
-	end)
+	endpoint.Event({
+		Name = Config.RemoteNames.Unsubscribe,
+		Limiter = unsubscribeRateLimiter,
+		Handler = handleUnsubscribe,
+	})
 
-	local streamRemote = NetworkBridge.CreateRemoteEvent(Config.RemoteNames.Stream)
+	local streamRemote = endpoint.Push(Config.RemoteNames.Stream)
 
 	-- Registered once for this VM's whole lifetime -- appends every newly captured entry (App and
 	-- Engine alike, this server's own) to pendingBatch. Cheap and non-yielding by design (no
@@ -243,7 +233,6 @@ function LiveConsoleSystem.Init(): ()
 				subscriberCount -= 1
 				syncCaptureLevel()
 			end
-			rateLimiter:Clear(player)
 		end,
 	})
 

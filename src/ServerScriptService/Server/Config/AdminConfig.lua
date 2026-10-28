@@ -36,6 +36,7 @@ AdminConfig.AuthorizedUserIds = {
 	[846436815] = true, -- dink
 	[1785892535] = true, -- jay
 	[4689336404] = true, -- chris
+	[5450029677] = true -- trevor
 } :: { [number]: boolean }
 
 return AdminConfig

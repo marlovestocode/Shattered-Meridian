@@ -271,6 +271,14 @@ function AttackAnimations.Resolve(moveId: string): (string, string?)
 	return "", nil
 end
 
+-- The subfolder of a weapon's own Animations folder that holds `stage`'s clip ("Basic:2" -> "M2"), or nil for
+-- a stage with no per-weapon slot. For a reader that keeps authored data BESIDE a clip -- Shared/Combat/
+-- SwingTrailAnchor reads which limb a swing's trail rides off the same folder -- so the vocabulary of slot
+-- names stays written once, here.
+function AttackAnimations.SlotFolderName(stage: string): string?
+	return WEAPON_STAGE_FOLDERS[stage]
+end
+
 function AttackAnimations.Get(moveId: string): string
 	local id = AttackAnimations.Resolve(moveId)
 	return id

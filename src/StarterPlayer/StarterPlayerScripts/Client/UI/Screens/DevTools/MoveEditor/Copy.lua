@@ -17,6 +17,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
+local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 
 local Copy = {}
 
@@ -58,6 +59,14 @@ local FAILURES: { [string]: Failure } = {
 		Message = "The projectile block is malformed, or names an option that does not exist.",
 		Tab = "Hitbox",
 	},
+	ProjectileOverBudget = {
+		Message = `One cast would put more than {ProjectileTypes.Caps.ShotsPerCast} shots in the air, counting every wave and split -- lower the count, the waves or the split.`,
+		Tab = "Hitbox",
+	},
+	ProjectileCastTooLong = {
+		Message = `The waves take longer than {ProjectileTypes.Caps.CastSeconds}s to fire -- fewer waves, or shorter intervals.`,
+		Tab = "Hitbox",
+	},
 	ProjectileCannotGrab = {
 		Message = "A projectile move cannot grab -- turn the grab off, or make the move melee.",
 		Tab = "Impact",
@@ -95,6 +104,14 @@ local FAILURES: { [string]: Failure } = {
 		Message = "A move that opens a realm cannot also grab -- pick Domain Expansion in the type bar again to clear the grab, or make it Melee.",
 		Tab = "Impact",
 		DomainTab = "Realm",
+	},
+	InvalidRagdoll = {
+		Message = "The ragdoll block is malformed, or names a trigger that does not exist.",
+		Tab = "Impact",
+	},
+	LauncherCannotRagdoll = {
+		Message = "A launcher hands the body to the air combo -- turn the launcher or the ragdoll off.",
+		Tab = "Impact",
 	},
 	InvalidPresentation = {
 		Message = "The presentation block is malformed -- a cue or a number in it is not what it should be.",
@@ -185,6 +202,26 @@ function Copy.FailureTab(failure: Failure, isDomain: boolean): string?
 	return if isDomain and failure.DomainTab then failure.DomainTab else failure.Tab
 end
 
+-- The RAGDOLL section's hints, by RagdollTypes field name (the section is built from that field list).
+Copy.RagdollHints = {
+	Enabled = "A landed hit throws the target as a real physical body: limp, thrown, spinning, until it gets back up. Works on any move, weapon stages included. On a grab, it happens when you THROW them, carrying the throw's push and lift (On kill never fires on a throw).",
+	Preset = "Starting shapes. Each sets the fields that make it and leaves the rest as you had them.",
+	Trigger = "Which landed hits put the body down. On kill is a finisher's flourish; on air hit, a juggle ender.",
+	DurationSeconds = "The least time it stays down. Nothing about getting up is checked before this.",
+	MaxSeconds = "The most time it stays down, at rest or not -- for a body on a slope or falling off an edge.",
+	RecoverOnSettle = "Off: it gets up the moment its least time is spent, wherever it is. On: it waits to come to rest first, so a launch lands before it stands.",
+	KnockbackScale = "How much of this move's knockback (Impact > KNOCKBACK) carries into the throw. 0 ignores it.",
+	Push = "Thrown away from you -- along the shot's flight for a projectile. Negative pulls it toward you.",
+	Lift = "Thrown upward. Negative drives it into the floor.",
+	Tumble = "Head-over-heels spin. Positive flips it backward, away from the hit.",
+	Twist = "Spin about its own spine, seen from above.",
+	Stiffness = "0 is a rag; 1 holds its shape and only bends a little at each joint.",
+	Bounce = "How much it rebounds off what it lands on.",
+	Friction = "How much it slides along what it lands on.",
+	GravityScale = "Below 1 it floats; above 1 it is slammed down.",
+	GetUpSeconds = "How long getting up takes: the body is righted and its limbs drawn back before control returns.",
+}
+
 -- Field hints. Only for fields whose meaning is not obvious from the label and unit.
 Copy.Hints = {
 	-- The bronze dot beside a field (Fields.lua's CHANGED FIELDS).
@@ -231,12 +268,42 @@ Copy.Hints = {
 	BodyPresets = "Sets the shot's shape and size. Its flight, volley and parry answers are kept.",
 	ScaleVolume = "Multiplies every measurement the shape reads (not its angle), within the editor's limits.",
 	ProjectileShape = "What flies. Pointed shapes (Cone, Pyramid, Wedge, Frustum) fly point first; the rest lie along the flight.",
-	SpreadPattern = "Single: one shot. Fan: spread across an arc. Row and Column: side by side, or stacked. Ring: around the aim.",
+	SpreadPattern = "Single: one shot. Fan: across an arc. Row, Column, Grid: side by side, flying parallel. Cone: diverging round the aim. Circle: a ring of shots flying parallel.",
+	-- 2026-10-26 (ProjectileTypes' header, "Formations beyond a line" onward).
+	Recipes = "Sets the whole behaviour -- volley, waves, flight and what ends it -- over the defaults. The body and the parry answers are kept; the move does not follow later changes to the recipe.",
+	Columns = "How many shots per row; the rows stack downward, a short last row centred.",
+	FormationRadius = "Circle: the ring's radius. Fan and Cone: how far out along its own heading each shot starts -- a 360 fan with a radius is a ring of emitters firing outward.",
+	ConvergeDistance = "Re-aims every shot through one point this far down the aim (0 = off). Needs shots that start apart: a Row, Column, Grid or Circle.",
+	WaveCount = "Fires the volley this many times. A stun, a parry or death stops the rest; a swing that finishes fires them all.",
+	WaveInterval = "Seconds between one wave and the next.",
+	ShotInterval = "Seconds between shots inside a wave (0 fires the wave at once).",
+	WaveRoll = "Turns each wave this much further round the aim than the last -- a Circle or Cone with a roll is a spiral.",
+	WaveAim = "Follow thrower re-aims every wave from where the thrower is now. Fixed aim fires every wave along the first one's line.",
+	AlternateSides = "Every second wave comes from the other side: the other hand for a hand anchor, the offset's left/right flipped otherwise.",
+	SpawnFrom = "Anchor: the offset is measured from the anchor. At the target: from the target, right/up/forward along the line from you to it -- Up 25 drops a shot from above. No target in range falls back to the anchor.",
+	SpawnHeight = "Lifts the spawn this far straight up -- world up, so it does not tilt with a hand or weapon the way the offset's Up does. Negative lowers it.",
+	HeightFrom = "The spawn point: added to wherever the offset puts it. The ground: measured from the ground under that point, wherever the thrower stands (no ground below falls back to the spawn point).",
+	LeadTarget = "Aims where the target will be at the shot's speed, not where it is.",
+	RangeMode = "Along path counts every stud flown (bounces and turns spend it). Straight line counts only the distance from where it spawned.",
+	SpeedBounds = "What acceleration and gravity can push its speed to. A shot that decelerates to its min speed keeps flying at it.",
+	Weave = "Swings the heading this far either side of its course, the frequency's times a second.",
+	WeaveMirrored = "Every second shot weaves the other way, so two shots side by side braid.",
+	ReturnAfter = "A boomerang: after this long it turns for home and ends in your hand (0 = never). Its range starts over for the way back, and it may hit again on it.",
+	HomingDelay = "Flies straight this long before it starts to turn.",
+	HomingDuration = "Turns for this long, then flies straight (0 = the whole flight).",
+	Rehit = "A piercing shot may strike the same body again after this long (0 = once). Every strike spends a pierce.",
+	Proximity = "Ends the shot the moment a body it could hit comes this close (0 = off). With a burst, a mine or a proximity fuse.",
+	Falloff = "Damage is full up to the start distance, then falls linearly to the minimum at max range. A minimum of 1 is no falloff.",
+	ExplodeOn = "Bursts where it ends. Impact: on a body, a wall or its fuse. Expire: when range or lifetime runs out. A parried or returned shot never bursts.",
+	ExplosionRadius = "Every body inside it is struck once, except the ones this shot already hit. A burst cannot be parried -- a parry reads as a guard.",
+	ExplosionScope = "Which shots burst once splits are involved. Split only: just the children (a cluster bomb).",
+	SplitOn = "Splits where it ends into new shots, which carry on away from it (off the surface, for a wall). They never re-hit what the parent hit.",
+	SplitGenerations = "How many times a split shot may itself split again.",
 	SpawnDirection = "Body facing: where the thrower faces. Anchor facing: where the anchor points. At target: at the homing target below.",
 	TargetSelection = "Closest to heading picks the target nearest the line of flight; Nearest, the closest body.",
 	ParryBehavior = "Parry one: the shot parried. Parry all: the whole volley. Cannot parry: the shot is blocked instead.",
-	SpawnPoint = "Where the shots spawn: the anchor, plus the offset below. Yaw and pitch aim the volley; roll turns its spread (a rolled fan is vertical).",
-	SpreadAngle = "Fan: the arc every shot shares, end to end (360 is a full ring). Ring: how wide the cone the shots form.",
+	SpawnPoint = "Where the shots spawn: the anchor, plus the offset below. Yaw and pitch aim the volley; roll turns its spread (a rolled fan is vertical). The offset's Up is the anchor's up; for straight up, use Spawn height.",
+	SpreadAngle = "Fan: the arc every shot shares, end to end (360 is a full ring). Cone: how wide the cone the shots form.",
 	Gravity = "Pulls shots down; negative floats them up. Zero flies straight.",
 	Homing = "Turns each shot toward a target within the range and angle below, at the strength's rate.",
 	Piercing = "Passes through the targets it hits, up to Max pierces; otherwise the first target stops it.",
@@ -438,6 +505,7 @@ Copy.Presentation = {
 		Bounce = "Each bounce off the world.",
 		WorldImpact = "A shot that ends on the world. Blank keeps the default scatter.",
 		End = "A shot that runs out of range or lifetime. A shot that hits a body plays the Hit cues instead.",
+		Burst = "A shot that explodes where it ends (Hitbox tab, ON END), in place of the two above. Blank keeps the default burst.",
 		DomainOpen = "As the realm begins to unfurl, at its centre. Every client; camera cues only the owner and those inside.",
 		DomainActive = "As the realm is established. Its core colour tints the realm (and the screen of anyone under its law); its glow draws the edge.",
 		DomainPulse = "Each time one of the realm's effects fires, at every body it reached. A strike's shot and its hit play their own cues on top.",

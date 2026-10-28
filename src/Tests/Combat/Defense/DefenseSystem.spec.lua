@@ -1214,4 +1214,20 @@ return function()
 			expect(outcomes[1].Kind).to.equal("Clean")
 		end)
 	end)
+
+	describe("ClashGuard", function()
+		it("costs the clash's posture from a healthy pool", function()
+			expect(DefenseSystem.ClashGuard(100, -12)).to.equal(88)
+		end)
+
+		it("never empties a guard", function()
+			local floor = DefenseConstants.Clash.GuardFloor
+			expect(DefenseSystem.ClashGuard(10, -12)).to.equal(floor)
+			expect(DefenseSystem.ClashGuard(floor, -12)).to.equal(floor)
+		end)
+
+		it("leaves a pool already under the floor where it is", function()
+			expect(DefenseSystem.ClashGuard(0, -12)).to.equal(0)
+		end)
+	end)
 end

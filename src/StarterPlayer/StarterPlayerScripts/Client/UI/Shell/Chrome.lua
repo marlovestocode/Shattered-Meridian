@@ -197,6 +197,9 @@ export type ChromeProps = {
 	-- Whether the local player is dead. Screens/DeathFeed's handle exposes this off the same Value
 	-- that drives the respawn overlay, so the two can never disagree about it.
 	Dead: UsedAs<boolean>,
+	-- Whether every open modal keeps the world visible (ObserveWorldVisible). Menu mode still holds -- input is still
+	-- gated and the HUD still steps aside -- but the scrim stays off. Absent means false.
+	WorldVisible: UsedAs<boolean>?,
 }
 
 local Chrome = {}
@@ -210,6 +213,16 @@ local Chrome = {}
 -- Components/ModalScreen.lua's own publishModalGate guards for, and for the same reason (the
 -- Attribute exists to gate a local player's input, and there is no local player).
 function Chrome.ObserveModalGate(scope: Scope): Fusion.Value<boolean>
+	return Chrome.ObservePlayerFlag(scope, AttributeConstants.UiModalOpen)
+end
+
+-- AttributeConstants.UiModalWorldVisible, the same way: whether every open modal leaves the world visible.
+function Chrome.ObserveWorldVisible(scope: Scope): Fusion.Value<boolean>
+	return Chrome.ObservePlayerFlag(scope, AttributeConstants.UiModalWorldVisible)
+end
+
+-- A boolean Attribute on the local player, as a Value. The body ObserveModalGate always had, named by its Attribute.
+function Chrome.ObservePlayerFlag(scope: Scope, attribute: string): Fusion.Value<boolean>
 	local open: Fusion.Value<boolean> = scope:Value(false)
 
 	local player = Players.LocalPlayer
@@ -218,7 +231,7 @@ function Chrome.ObserveModalGate(scope: Scope): Fusion.Value<boolean>
 	end
 
 	local function read(): ()
-		open:set(player:GetAttribute(AttributeConstants.UiModalOpen) == true)
+		open:set(player:GetAttribute(attribute) == true)
 	end
 
 	-- Read once before connecting, not only on the next change. A modal open at the moment this is
@@ -226,7 +239,7 @@ function Chrome.ObserveModalGate(scope: Scope): Fusion.Value<boolean>
 	-- while UI.Mount() is not a window in which a modal can already be open today, "the first value
 	-- arrives on the first edge" is exactly the assumption that breaks the day one can be.
 	read()
-	table.insert(scope, player:GetAttributeChangedSignal(AttributeConstants.UiModalOpen):Connect(read))
+	table.insert(scope, player:GetAttributeChangedSignal(attribute):Connect(read))
 
 	return open
 end
@@ -260,7 +273,7 @@ function Chrome.New(scope: Scope, props: ChromeProps): ChromeHandle
 		-- Shell/Regions.lua (SCRIM_TRANSPARENCY), not here: this file says WHEN the layer steps back,
 		-- never how far.
 		Dim = scope:Computed(function(use): number
-			return if use(mode) == "Menu" then 1 else 0
+			return if use(mode) == "Menu" and not use(props.WorldVisible or false) then 1 else 0
 		end),
 		-- The corner readouts describe the world around the player, and they are only worth screen
 		-- space while the player is IN it: a dead player is not, and a player reading a panel has taken

@@ -29,7 +29,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local AdminTypes = require(ReplicatedStorage.Shared.Admin.AdminTypes)
@@ -43,7 +42,7 @@ local VehicleTypes = require(ReplicatedStorage.Shared.Vehicle.VehicleTypes)
 
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
 local DevMenuModule = require(script.Parent.Parent.Parent.UI.Screens.DevTools.DevMenu)
-local KeybindManager = require(script.Parent.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Parent.Input.InputRouter)
 local ParkourDebug = require(script.Parent.Parent.Parent.Parkour.ParkourDebug)
 local RemoteInvoker = require(script.Parent.Parent.Parent.Network.RemoteInvoker)
 local SpectateController = require(script.Parent.SpectateController)
@@ -707,14 +706,16 @@ local function startDevMenu(
 		handle.IsOpen:set(false)
 	end)
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if KeybindManager.Matches("DevMenuToggle", input) then
+	-- The router's System layer: never modal-gated (the panel IS the modal), and the chat-box check stays here.
+	InputRouter.Bind("DevMenuToggle", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
 			handle.IsOpen:set(not peek(handle.IsOpen))
-		end
-	end)
+		end,
+	})
 
 	handle.Intent:Connect(function(intent: Intent)
 		local handler = HANDLERS[intent.Kind]

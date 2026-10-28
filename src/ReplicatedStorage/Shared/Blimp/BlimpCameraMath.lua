@@ -158,7 +158,10 @@ export type State = {
 -- for when to reach for a spring over an ease. It is shared because Shared/Blimp/BlimpPilotPose.lua
 -- needs the identical integrator for the mounted body's lean, and two hand-rolled copies of a damped
 -- oscillator is exactly how one of them ends up subtly wrong.
-local springStep = FlightMath.SpringStep
+--
+-- SUB-STEPPED (FlightMath.SpringAdvance, 2026-10-27), so the curve does not depend on the frame rate: a single implicit
+-- step damps more the longer it is, and the same turn used to settle visibly flatter at 30 fps than at 144.
+local springStep = FlightMath.SpringAdvance
 
 -- THE MEASUREMENT HALF OF THIS MODULE LIVES IN Shared/Vessel/VesselMotion.lua NOW, and Observe/
 -- ZeroMotion below are delegations to it. The line the split was taken along: this file does two

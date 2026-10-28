@@ -45,6 +45,7 @@ RootControl.Owners = {
 	GrabThrower = "GrabThrower",
 	AirCombo = "AirCombo",
 	Vessel = "Vessel",
+	Ragdoll = "Ragdoll",
 }
 
 -- Humanoid -> owner -> true. Weak keys: a destroyed Humanoid takes its claims with it.

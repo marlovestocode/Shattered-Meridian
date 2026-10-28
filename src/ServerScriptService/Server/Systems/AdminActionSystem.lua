@@ -47,6 +47,7 @@ local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 
 local MovementAllowance = require(script.Parent.Parent.Combat.MovementAllowance)
 
@@ -89,7 +90,7 @@ export type AdminOverrideState = {
 	InvisibleTrove: Trove.TroveInstance?,
 }
 
-local overrideStates: { [Player]: AdminOverrideState } = {}
+local overrideStates: { [Player]: AdminOverrideState } = PlayerScoped.New("AdminActionSystem.overrideStates")
 
 function AdminActionSystem.CreateOverrideState(): AdminOverrideState
 	return {
@@ -500,7 +501,6 @@ function AdminActionSystem.Init(): ()
 			if state then
 				releaseInvisibility(state, false)
 			end
-			overrideStates[player] = nil
 		end,
 		OnCharacter = function(player: Player, character: Model, humanoid: Humanoid)
 			local state = overrideStates[player]

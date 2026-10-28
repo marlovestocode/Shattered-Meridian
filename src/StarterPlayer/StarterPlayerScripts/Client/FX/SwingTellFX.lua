@@ -29,6 +29,7 @@ local Workspace = game:GetService("Workspace")
 
 local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local HighlightBudget = require(script.Parent.HighlightBudget)
 
 local logger = Logger.scope("SwingTellFX")
 
@@ -67,7 +68,10 @@ local function onTagged(model: Instance): ()
 		return
 	end
 
-	local highlight = Instance.new("Highlight")
+	local highlight = HighlightBudget.Acquire("SwingTell")
+	if highlight == nil then
+		return
+	end
 	highlight.Name = HIGHLIGHT_NAME
 	highlight.Adornee = model
 	highlight.DepthMode = Enum.HighlightDepthMode.Occluded

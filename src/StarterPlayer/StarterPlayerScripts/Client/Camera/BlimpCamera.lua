@@ -9,14 +9,23 @@
 	DevCameraOcclusionMode for the duration.
 
 	A SIBLING OF Client/Camera/FlightCamera.lua, not a replacement, and the two can never be engaged at
-	once (a flying admin is not welded to a helm). The composition posture is identical and deliberately
-	so: CameraType stays Custom throughout, so Roblox's own follow-cam keeps doing the mouse orbit, the
-	zoom and the collision, and this module only nudges what is already there. It writes rotation onto
-	camera.CFrame at Enum.RenderPriority.Camera + 1, its positional offset through Client/FX/
-	CameraOffsetComposer.lua's named "Blimp" slot, and its FOV through Client/FX/FOVOffset.lua's -- never
-	Humanoid.CameraOffset or camera.FieldOfView directly. Those two composers exist precisely so a third
-	writer can be added without the manual mutual-exclusion flags their headers describe; this is that
-	third writer, and it needed no changes to either.
+	once (a flying admin is not welded to a helm). CameraType stays Custom throughout, so Roblox's own follow-cam keeps
+	doing the mouse orbit, the zoom and the collision, and this module only nudges what is already there -- through the
+	three composers, never a property of its own: the positional offset through Client/FX/CameraOffsetComposer.lua's
+	"Blimp" slot, the FOV through Client/FX/FOVOffset.lua's, and the roll, sway and pitch through
+	Client/FX/CameraRotationComposer.lua's.
+
+	THE ROTATION GOES THROUGH THE COMPOSER, AND THAT WAS THE BUG (2026-10-27). This module used to multiply its pitch, yaw
+	and roll straight onto Camera.CFrame at Camera + 1 and leave them there. The default camera reads its look direction
+	back off Camera.CFrame each frame, so the sway and the pitch became the next frame's starting look and were applied
+	again on top: through a turn the view kept swinging round for as long as the turn lasted, and up a climb it kept
+	tilting. The composer applies the rotation last and takes it back off exactly before the next camera update, so the
+	sway reads as sway and the player's own look is untouched. The same pass moved this step to its own slot (BlimpCamera) ahead of the
+	offset composer instead of a frame behind it -- and the springs onto FlightMath.SpringAdvance, so the ship feels the same
+	at 30 and at 144 fps.
+
+	NOT ON THE FOLLOW CAMERA, NOT APPLIED. The rotation composer only rotates a Custom camera, and CameraOffset only moves
+	one, so an intro or a spectate camera taking over mid-flight is left alone; the springs keep running underneath.
 
 	IT READS THE HULL, NOT THE SERVER, AND THAT IS THE WHOLE ARCHITECTURE. The obvious alternative is
 	to stream BlimpDrive's own integrator state (Speed/YawRate/ClimbRate) down to the pilot and drive
@@ -43,7 +52,7 @@
 	the camera, the wind, the audio -- would silently do nothing, which is exactly what that failure
 	looked like from the deck.
 
-	IT BINDS ON MOUNT AND UNBINDS ON RELEASE, unlike FlightCamera/ShiftLockCamera, which stay bound for
+	IT BINDS ON MOUNT AND UNBINDS ON RELEASE, unlike FlightCamera/CombatCamera, which stay bound for
 	the session and early-out. Those two are watching for a state that can begin at any moment with no
 	external signal; this one is told, by Client/Blimp/BlimpController.lua, which already knows. Most
 	players never board a blimp, and a permanently bound render step that only ever checks a nil is a
@@ -59,13 +68,12 @@
 	is decided there, so that it can be tested without a place file), the tuning
 	(Shared/Blimp/BlimpConstants.Camera), who is mounted (Server/Systems/BlimpSystem.lua, relayed by
 	BlimpController), the mounted BODY's lean (Shared/Blimp/BlimpPilotPose.lua -- a different pose on a
-	different channel), or any camera property other than CFrame rotation and the two composed slots.
+	different channel), or any camera property directly -- everything it shows goes through the three composers.
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
-local Workspace = game:GetService("Workspace")
 
 local BlimpCameraMath = require(ReplicatedStorage.Shared.Blimp.BlimpCameraMath)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
@@ -73,7 +81,11 @@ local BlimpTagging = require(ReplicatedStorage.Shared.Blimp.BlimpTagging)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local CameraOffsetComposer = require(script.Parent.Parent.FX.CameraOffsetComposer)
+local CameraRotationComposer = require(script.Parent.Parent.FX.CameraRotationComposer)
 local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
+local SettingsStore = require(script.Parent.Parent.Settings.SettingsStore)
+local Types = require(ReplicatedStorage.Shared.Types)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("BlimpCamera")
 
@@ -151,15 +163,11 @@ local function unbind(): ()
 	-- releasing window was for.
 	CameraOffsetComposer.ClearContinuous(COMPOSER_SLOT)
 	FOVOffset.ClearContinuous(COMPOSER_SLOT)
+	CameraRotationComposer.ClearContinuous(COMPOSER_SLOT)
 	Players.LocalPlayer.DevCameraOcclusionMode = savedOcclusionMode
 end
 
 local function onRenderStep(deltaTime: number): ()
-	local camera = Workspace.CurrentCamera
-	if not camera then
-		return
-	end
-
 	local currentHull = resolveHull()
 	-- A hull that stopped existing mid-flight (the model destroyed, the blimp untagged, the station
 	-- streamed out) is treated exactly like a dismount rather than as an error: the release path is
@@ -183,17 +191,16 @@ local function onRenderStep(deltaTime: number): ()
 	BlimpCameraMath.Step(state, deltaTime, motionEnabled)
 
 	local pose = state.Pose
-	-- Already sprung upstream, so both composers are handed the FINAL value with no ease rate of their
-	-- own -- the same "do not double-ease" contract FlightCamera's own two SetContinuous calls follow.
-	CameraOffsetComposer.SetContinuous(COMPOSER_SLOT, pose.Offset)
-	FOVOffset.SetContinuous(COMPOSER_SLOT, pose.FovDelta)
-
-	-- Composed onto whatever the stock follow-cam produced this frame rather than replacing it, which
-	-- is what keeps mouse orbit, zoom and collision working untouched. Same technique, same
-	-- RenderPriority tier and same reasoning as FlightCamera's own bank roll.
-	if pose.RollRadians ~= 0 or pose.YawRadians ~= 0 or pose.PitchRadians ~= 0 then
-		camera.CFrame = camera.CFrame * CFrame.Angles(pose.PitchRadians, pose.YawRadians, pose.RollRadians)
-	end
+	-- Already sprung upstream, so every composer is handed the FINAL value with no ease rate of its own -- the same
+	-- "do not double-ease" contract FlightCamera's own SetContinuous calls follow. The rotation is composed onto whatever
+	-- the stock follow-cam produced this frame and taken back off before the next one (see this file's header).
+	CameraOffsetComposer.SetContinuous(COMPOSER_SLOT, pose.Offset, nil)
+	FOVOffset.SetContinuous(COMPOSER_SLOT, pose.FovDelta, nil)
+	CameraRotationComposer.SetContinuous(
+		COMPOSER_SLOT,
+		Vector3.new(pose.PitchRadians, pose.YawRadians, pose.RollRadians),
+		nil
+	)
 
 	if releasing and isSettled() then
 		unbind()
@@ -233,7 +240,7 @@ function BlimpCamera.SetMount(mountedStation: BasePart?): ()
 	bound = true
 	savedOcclusionMode = Players.LocalPlayer.DevCameraOcclusionMode
 	Players.LocalPlayer.DevCameraOcclusionMode = Enum.DevCameraOcclusionMode.Invisicam
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("BlimpCamera"), onRenderStep)
 	logger:debug("Blimp camera engaged", { cruiseSpeed = cruiseSpeed })
 end
 
@@ -242,6 +249,12 @@ end
 function BlimpCamera.SetMotionEnabled(enabled: boolean): ()
 	motionEnabled = enabled
 end
+
+-- The player's comfort toggle, now and on every change (Client/Settings/SettingsStore). At require time: this camera has no Start
+-- of its own, and the subscription only writes the local above.
+SettingsStore.Observe("Comfort", function(comfort: Types.ComfortSettings)
+	BlimpCamera.SetMotionEnabled(comfort.VehicleCameraMotion)
+end)
 
 -- The engine telegraph moved. `rungDelta` is signed -- positive is a rung toward flank.
 --

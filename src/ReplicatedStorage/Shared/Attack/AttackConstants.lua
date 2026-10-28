@@ -76,7 +76,7 @@ AttackConstants.Sequence = {
 	-- below -- while keeping the ordering real.
 	--
 	-- TWO RELATIONSHIPS BOUND IT, and both are trivially satisfied now, which is worth stating rather
-	-- than leaving silent: it must stay well under Input.BufferSeconds (0.35 -- the gap between them IS
+	-- than leaving silent: it must stay well under Input.BufferSeconds (0.55 -- the gap between them IS
 	-- the early-press forgiveness a player actually gets, and at 0.01 that forgiveness is essentially
 	-- the whole 0.35s), and the resulting stage-to-stage gap must stay under
 	-- DamageConstants.Combo.WindowSeconds (0.9) or a landed string stops escalating and the Finisher
@@ -383,14 +383,20 @@ AttackConstants.Input = {
 	-- widened back out to essentially the full 0.35s. Still the first place to recheck if
 	-- ChainDelaySeconds ever moves again.
 	--
-	-- Still deliberately shorter than DamageConstants.Hitstun.Seconds (0.65 as of that constant's own
-	-- rebalance), so a swing buffered at the moment of being hit expires rather than firing the instant
-	-- hitstun ends -- being interrupted should cost the exchange, not merely delay it. That gives the
-	-- pair a real ceiling: raising the chain delay much further means raising this, and raising this
-	-- past 0.65 would silently un-do the interruption rule. Hitstun's own rise from 0.45 to 0.65 only
-	-- WIDENED this margin (0.10s of slack became 0.30s), so nothing here needed to change to stay safe
-	-- -- worth stating explicitly since the number this comment references moved out from under it.
-	BufferSeconds = 0.35,
+	-- RAISED TO 0.55 (2026-10-26, "the 1 2 3 combo feels really unresponsive"). Measured from the buffer's
+	-- own arithmetic: a blade M1 commits for its 0.583s clip plus the 0.05 chain beat, so at 0.35 a press
+	-- made in the first ~0.28s of the swing -- every press before the impact frame (~0.31s) -- was DROPPED
+	-- outright, server and client alike. A player clicking on the swing rather than after the hit lost the
+	-- click and saw the string stall. At 0.55 only a press inside the first ~0.08s is dropped: a double
+	-- click, not a rhythm. One slot (BufferDepth) still means mashing builds no backlog.
+	--
+	-- THE INTERRUPTION RULE IS EXPLICIT NOW, not a timing coincidence. It used to rest on this number staying
+	-- under every hitstun, so a press buffered at the moment of being hit would expire before the stun ended
+	-- -- which capped this at the shortest stun (the Fists' 0.40). A stunning hit now drops the defender's
+	-- buffered press outright (AttackRequestSystem.NoteStunned, and the client's own CancelSwing), so being
+	-- interrupted still costs the exchange and this number is free of the stun table. A press made DURING a
+	-- stun is still buffered on purpose: that is the stun parry's counter (AttackRequestSystem.waitsOutGuard).
+	BufferSeconds = 0.55,
 
 	-- Only the newest refused press is buffered; an older one it replaces is dropped rather than
 	-- queued. Mashing must not build a backlog that fires as a burst once the gate opens -- that is
@@ -587,7 +593,8 @@ AttackConstants.Presentation = {
 	-- client-side. See Client/Combat/AttackInputClient.lua's header for the whole no-prediction
 	-- stance this sits inside.
 	SwingPunch = {
-		FOVDelta = -1.6,
+		-- -1 since 2026-10-27 (was -1.6): it fires on EVERY press, so in an M1 string it was a constant pulse.
+		FOVDelta = -1,
 		OutSeconds = 0.06,
 		BackSeconds = 0.14,
 		-- Floor between two local cues, so mashing during hitstun does not strobe the camera. Shorter
@@ -624,7 +631,9 @@ AttackConstants.Presentation = {
 			GuardBroken = "PostureBreak",
 			Blocked = "HitLight",
 			Parried = "Parry",
-			Trade = "HitHeavy",
+			-- A clash is one symmetric event, so it shakes both sides the same (a lone clash is one contact:
+			-- the attacker's and the defender's preset used to differ).
+			Trade = "HitLight",
 			Evaded = "None",
 		} :: { [string]: string },
 	},
@@ -762,7 +771,7 @@ AttackConstants.Presentation = {
 		GroundedOnly = true,
 	},
 
-	-- A short Trail tracing the attacking limb through its own swing -- Client/FX/AttackTrail.lua.
+	-- A short Trail tracing the attacking limb through its own swing -- Client/FX/SwingTrail.lua.
 	-- LOCAL-PLAYER-ONLY, the same Attack_Started visibility Client/FX/CombatAudio.lua's own PlaySwing
 	-- already accepts for the swing whoosh (see AttackRequestSystem's own FireClient, not
 	-- FireAllClients): this reads other characters' swings off nothing today, only the thrower's own.
@@ -802,29 +811,54 @@ AttackConstants.Presentation = {
 		-- laid down, 1 is the one about to vanish. Full width where the fist/blade is now, thinning to a
 		-- sliver as it fades, so the trail reads as a streak behind the strike rather than a flat ribbon.
 		--
-		-- THERE IS NO Width PROPERTY ON A Trail, and this table used to carry one (Client/FX/AttackTrail.lua
+		-- THERE IS NO Width PROPERTY ON A Trail, and this table used to carry one (the old Client/FX/AttackTrail.lua
 		-- set it and threw on every swing). A trail's thickness IS the distance between its two
 		-- Attachments -- the offset pairs below -- times this scale.
 		WidthScale = NumberSequence.new({
 			NumberSequenceKeypoint.new(0, 1),
 			NumberSequenceKeypoint.new(1, 0.15),
 		}),
-		-- Where the two Attachments sit, in studs along the part's axis from its centre, and therefore how
-		-- thick the trail is (their separation). See Client/FX/AttackTrail.lua's own header for why these
-		-- are two pairs.
-		--   * Fists: the R6 Right Arm is 2 studs long, so -1 is the fist. A 0.3-stud pair right at the
-		--     knuckles draws a thin line that follows the punch, not a sheet swept by the whole forearm.
-		--   * Weapons: along the Handle's own axis out to the blade, so the trail covers the edge that hit.
-		-- Widened from a 0.3-stud pair (-0.75..-1.05) to 0.5: at 0.3 the camera-facing ribbon was a
-		-- hairline at fighting distance. Still only the forearm's last half-stud, not a sheet swept by the
-		-- whole arm -- Tests/FX/SwingTrail.spec holds it at or under 0.5.
-		FistOffsetStuds = { Near = -0.55, Far = -1.05 },
-		-- Which limb each stage of the bare-hands Basic string strikes with, in string order: jab with the
-		-- left, cross with the right, then a kick with the left foot. R6 limb part names. Anything not in
-		-- this list -- the Finisher (StageIndex 0), a Heavy, a stage past the end -- uses FistDefaultLimb.
-		-- The same offsets serve legs: an R6 leg is 2 studs long like an arm, so -1 is the foot.
-		FistLimbByStage = { "Left Arm", "Right Arm", "Left Leg" },
-		FistDefaultLimb = "Right Arm",
+		-- WHAT EACH SWING'S TRAIL RIDES -- Shared/Combat/SwingTrailAnchor.lua resolves it, in this order:
+		--   1. the weapon's own `TrailAnchor` Attribute on the slot folder that holds the clip
+		--      (Workspace.Weapons.<Id>.Animations.M1 and so on -- AttackAnimations' slot folders), because the
+		--      limb belongs to the clip: a weapon that authors its own left-handed M2 says so beside it;
+		--   2. ByStage below, keyed by the stage whose clip actually plays (an air beat that borrows an M1's
+		--      clip uses that M1's entry -- AttackAnimations.Resolve);
+		--   3. Default.
+		-- Unarmed (Fists, or an art cast empty-handed) and Armed are separate tables because an armed swing's
+		-- trail is the weapon by default and a bare one's is a hand.
+		--
+		-- THE UNARMED STRING IS RIGHT, LEFT, RIGHT because the clips are: AttackAnimations' shared Basic:1
+		-- and Basic:3 are the same clip (the right cross) and Basic:2 is the left. The table used to say
+		-- left arm / right arm / left LEG, so two punches out of three drew on a limb that was not moving.
+		-- Values: "RightArm" | "LeftArm" | "RightLeg" | "LeftLeg" | "Weapon".
+		Anchors = {
+			Unarmed = {
+				Default = "RightArm",
+				ByStage = {
+					["Basic:1"] = "RightArm",
+					["Basic:2"] = "LeftArm",
+					["Basic:3"] = "RightArm",
+				} :: { [string]: string },
+			},
+			Armed = {
+				Default = "Weapon",
+				ByStage = {} :: { [string]: string },
+			},
+		},
+		-- The slot-folder Attribute described in (1) above.
+		AnchorAttribute = "TrailAnchor",
+		-- A limb's trail: the two Attachments sit on the limb's long axis around its TIP -- the rig's own
+		-- grip/foot Attachment when it has one (R6 RightGripAttachment etc.), otherwise the end of the part.
+		-- BackStuds runs up the limb toward the shoulder, PastStuds a touch beyond the knuckles; their sum is
+		-- the ribbon's width (a Trail has no Width property -- see WidthScale above). Half a stud: thick
+		-- enough to read at fighting distance, short enough to be a fist's streak rather than a sheet swept
+		-- by the whole forearm. Tests/FX/SwingTrail.spec holds it at or under 0.5.
+		LimbTip = { BackStuds = 0.45, PastStuds = 0.05 },
+		-- A weapon's trail, best source first: a pair of Attachments the weapon author placed anywhere in the
+		-- model with these names; else the full length of a part named "Blade" along its longest axis; else
+		-- these offsets along the Handle's own Z (-Z is down the blade, WeaponRoster's grip convention).
+		WeaponAttachmentNames = { Near = "TrailNear", Far = "TrailFar" },
 		WeaponOffsetStuds = { Near = 0.5, Far = -3.2 },
 		-- THE FEINT CUE. When the server confirms a feint (Attack_Cancelled), the same trail flares for
 		-- this long in this colour as the arm pulls back -- a short, cold streak that reads in hindsight
@@ -832,6 +866,10 @@ AttackConstants.Presentation = {
 		-- trail itself; the defender's reward is the parry they wasted, not a banner.
 		FeintColor = ColorSequence.new(Color3.fromRGB(120, 200, 255)),
 		FeintPulseSeconds = 0.12,
+		-- One "Trail lit" line per swing in the Live Console (F5, search SwingTrail): the move, whether the
+		-- window was read off the clip, and the clip playhead it lit at. For diagnosing a trail that draws
+		-- off the punch; off in play.
+		Debug = false,
 	},
 }
 

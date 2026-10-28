@@ -22,7 +22,6 @@
 ]]
 
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -32,6 +31,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local StorybookModule = require(script.Parent.Parent.Parent.UI.Screens.DevTools.Storybook)
 local Chrome = require(script.Parent.Parent.Parent.UI.Shell.Chrome)
+local InputRouter = require(script.Parent.Parent.Parent.Input.InputRouter)
 
 local peek = Fusion.peek
 
@@ -58,11 +58,8 @@ function StorybookClient.Start(storybook: Lazy.Lazy<StorybookModule.StorybookHan
 
 	local bound = false
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	InputRouter.BindDebugKey("Storybook", function(gameProcessed: boolean)
 		if gameProcessed then
-			return
-		end
-		if input.KeyCode ~= Config.ToggleKeyCode then
 			return
 		end
 

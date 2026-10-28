@@ -20,7 +20,6 @@
 	(UI/Screens/Inventory/init.lua), or any item's meaning (Shared/Inventory/ItemCatalog).
 ]]
 
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
@@ -30,9 +29,10 @@ local InventoryConstants = require(ReplicatedStorage.Shared.Inventory.InventoryC
 local ItemCatalog = require(ReplicatedStorage.Shared.Inventory.ItemCatalog)
 
 local InventoryScreen = require(script.Parent.Parent.UI.Screens.Inventory)
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
+local ClientState = require(script.Parent.Parent.UI.State.ClientState)
 
 type InventoryHandle = InventoryScreen.InventoryHandle
 type SnapshotPayload = InventoryConstants.SnapshotPayload
@@ -121,11 +121,11 @@ function InventoryClient.Start(handle: InventoryHandle, chrome: Chrome.ChromeHan
 		logger:debug("Inventory closed on Escape")
 	end)
 
-	local snapshotRemote = NetworkBridge.GetRemoteEvent(InventoryConstants.RemoteNames.Snapshot)
 	local actionRemote = NetworkBridge.GetRemoteFunction(InventoryConstants.RemoteNames.Action)
 
 	local lastRevision = -1
-	snapshotRemote.OnClientEvent:Connect(function(payload: unknown)
+	-- Through ClientState's slice cache: a snapshot pushed before this started (profile load during boot) arrives here at once.
+	ClientState.Observe(InventoryConstants.RemoteNames.Snapshot, function(payload: unknown)
 		if not InventoryClient.IsValidSnapshot(payload) then
 			logger:warn("Malformed Inventory_Snapshot ignored", { payload = tostring(payload) })
 			return
@@ -159,16 +159,18 @@ function InventoryClient.Start(handle: InventoryHandle, chrome: Chrome.ChromeHan
 		end)
 	end)
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if KeybindManager.Matches("InventoryToggle", input) then
+	-- The router's System layer: never modal-gated (the panel IS the modal), and the chat-box check stays here.
+	InputRouter.Bind("InventoryToggle", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
 			local nowOpen = not peek(handle.IsOpen)
 			handle.IsOpen:set(nowOpen)
 			logger:debug("Inventory toggled", { open = nowOpen })
-		end
-	end)
+		end,
+	})
 
 	-- Ask for the snapshot once, ahead of any open -- see this file's header.
 	task.spawn(function()

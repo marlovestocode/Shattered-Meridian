@@ -372,6 +372,25 @@ return function()
 			expect(state.Pose.Offset.Magnitude < 100).to.equal(true)
 		end)
 
+		-- The springs are sub-stepped (FlightMath.SpringAdvance), so the same turn reads the same at any frame rate. Turned at
+		-- zero forward speed so the engine rumble (a function of time, not of the spring) is silent.
+		it("rolls the same way into a turn at 30, 60 and 144 fps", function()
+			local function rollAfter(fps: number): number
+				local state = BlimpCameraMath.NewState()
+				for _ = 1, fps / 2 do
+					BlimpCameraMath.Observe(state, LEVEL, Vector3.zero, Vector3.new(0, 0.8, 0), CRUISE, 1 / fps)
+					BlimpCameraMath.Step(state, 1 / fps, true)
+				end
+				return state.Pose.RollRadians
+			end
+			local reference = rollAfter(144)
+			expect(math.abs(reference) > 1e-2).to.equal(true)
+			for _, fps in { 30, 60 } do
+				-- Sub-stepped this is within a few tenths of a percent; the single step it replaced was 3% off at 30 fps.
+				expect(math.abs(rollAfter(fps) - reference) / math.abs(reference) < 0.01).to.equal(true)
+			end
+		end)
+
 		it("treats a zero or negative frame as no frame at all", function()
 			local state = BlimpCameraMath.NewState()
 			advance(state, forwardAt(CRUISE), Vector3.new(0, 0.8, 0), 2)

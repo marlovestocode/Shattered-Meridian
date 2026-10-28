@@ -75,7 +75,9 @@ local ItemCatalog = require(ReplicatedStorage.Shared.Inventory.ItemCatalog)
 local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSystem)
 local InventorySystem = require(script.Parent.Parent.Parent.Systems.InventorySystem)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.Parent.Parent.Systems.PlayerStateSystem)
 
 type WeaponId = Types.WeaponId
 
@@ -93,7 +95,7 @@ type Record = {
 	Drawn: boolean,
 }
 
-local records: { [Player]: Record } = {}
+local records: { [Player]: Record } = PlayerScoped.New("WeaponInventorySystem.records")
 -- Unsubscribes from InventorySystem.OnLoaded; held so Reset (specs) can drop it before Init re-adds it.
 local disconnectLoaded: (() -> ())? = nil
 
@@ -386,6 +388,11 @@ local function addPrompt(model: Instance): ()
 end
 
 function WeaponInventorySystem.Init(): ()
+	PlayerStateSystem.Register("WeaponInventory", function(player: Player)
+		if records[player] then
+			pushInventory(player)
+		end
+	end)
 	if started then
 		return
 	end
@@ -440,11 +447,6 @@ function WeaponInventorySystem.Init(): ()
 			record.Drawn = false
 			applyToCharacter(player)
 			pushInventory(player)
-		end,
-		OnPlayerRemoving = function(player: Player)
-			records[player] = nil
-			toggleLimiter:Clear(player)
-			pickupLimiter:Clear(player)
 		end,
 	})
 

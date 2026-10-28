@@ -96,8 +96,11 @@ local clientModulesToLoad = {
 	-- Shared/PlayerLifecycle.lua. Nothing in this place drives a real character, so their BEHAVIOUR
 	-- still needs a playtest -- but a broken require path or a bad call shape in the shared binder
 	-- would previously have gone unnoticed here, and these entries close that.
-	StarterPlayer.StarterPlayerScripts.Client.Camera.ShiftLockCamera,
+	StarterPlayer.StarterPlayerScripts.Client.Camera.CombatCamera,
 	StarterPlayer.StarterPlayerScripts.Client.Camera.FlightCamera,
+	StarterPlayer.StarterPlayerScripts.Client.Camera.BlimpCamera,
+	StarterPlayer.StarterPlayerScripts.Client.Camera.CameraMotion,
+	StarterPlayer.StarterPlayerScripts.Client.FX.CameraRotationComposer,
 	StarterPlayer.StarterPlayerScripts.Client.Flight.FlightController,
 	StarterPlayer.StarterPlayerScripts.Client.Emotes.EmoteController,
 	StarterPlayer.StarterPlayerScripts.Client.FX.CameraOffsetComposer,

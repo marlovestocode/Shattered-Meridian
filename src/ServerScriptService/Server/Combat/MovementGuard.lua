@@ -51,6 +51,8 @@ local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstan
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local SuspicionLedger = require(ServerScriptService.Server.Systems.Support.SuspicionLedger)
@@ -65,13 +67,13 @@ local ATTRIBUTES = AttributeConstants
 
 -- Runtime -----------------------------------------------------------------------------------------------------
 
-local tracks: { [Player]: MovementJudge.Track } = {}
+local tracks: { [Player]: MovementJudge.Track } = PlayerScoped.New("MovementGuard.tracks")
 -- The highest speed each player was allowed recently, and when. Allowed speed can DROP faster than a body
 -- sheds momentum: RunSystem ramps WalkSpeed toward zero while a parkour action owns the body, so the instant a
 -- dash or slide hands control back, WalkSpeed is near zero and the body is still gliding at dash speed. Judging
 -- that glide against the dropped number is a false positive on every honest dash. A window is therefore judged
 -- against the best allowance it overlapped (CONFIG.Speed.CarrySeconds), never one sampled mid-ramp.
-local recentAllowance: { [Player]: { Speed: number, At: number } } = {}
+local recentAllowance: { [Player]: { Speed: number, At: number } } = PlayerScoped.New("MovementGuard.recentAllowance")
 local ledger = SuspicionLedger.New({
 	Name = "Movement",
 	ReasonCode = "MovementImplausible",
@@ -92,13 +94,10 @@ local function excuseOf(humanoid: Humanoid, root: BasePart, now: number): string
 	if root.Anchored or humanoid.PlatformStand then
 		return "Held"
 	end
-	if
-		humanoid:GetAttribute(ATTRIBUTES.RootControlLocked) == true
-		or humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
-		or humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
-		or humanoid:GetAttribute(ATTRIBUTES.Flying) == true
-	then
-		return "ServerHeld"
+	-- Root-locked, grabbed, mounted or flying: BodyRestraint's "Judge" row.
+	local held = BodyRestraint.Refusal(humanoid, "Judge")
+	if held then
+		return held
 	end
 	local allowance = humanoid:GetAttribute(ATTRIBUTES.KnockbackUntil)
 	if typeof(allowance) == "number" and now <= allowance then
@@ -201,8 +200,6 @@ function MovementGuard.Init(): ()
 			tracks[player] = nil
 		end,
 		OnPlayerRemoving = function(player: Player)
-			tracks[player] = nil
-			recentAllowance[player] = nil
 			ledger:Release(player)
 		end,
 	}))

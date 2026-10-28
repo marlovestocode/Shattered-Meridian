@@ -161,7 +161,8 @@ end
 -- The adapter. See this file's header for every reason a launch is not audited.
 local function onDamageApplied(outcome: DefenseTypes.DefenseOutcome, result: DamageTypes.DamageResult): ()
 	local launch = result.Launch
-	if launch == nil or not Knockback.IsAuditable(launch) then
+	-- A ragdolled body's launch is thrown by the server (RagdollSystem), not handed to the client: nothing to audit.
+	if launch == nil or result.Ragdoll ~= nil or not Knockback.IsAuditable(launch) then
 		return
 	end
 	local player = Players:GetPlayerFromCharacter(outcome.Defender)

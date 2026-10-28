@@ -31,6 +31,10 @@
 	the swing-up, so a press the server had turned into a plain block LOOKED like a parry -- which is how a
 	block reads as "it should have parried". See claimGuardPress for the claims and the handoff.
 
+	THE HELD GUARD IS NEVER SHOWN WHILE IT DOES NOTHING. A stunned body (a linked M1 string) or one held in an air
+	combo blocks nothing -- only a timed parry counts (DefenseConstants.StunParry) -- so the held-guard loop waits
+	out the stun and comes down if one starts under it. See showHeldGuard.
+
 	BOTH CLIPS ARE PER-WEAPON. Which pair a press plays is resolved by
 	Shared/Defense/WeaponDefenseAnimations.lua off the drawn weapon's own Animations/PARRY and
 	Animations/BLOCK folders, falling back to DefenseConstants.ParryAnimationId/BlockHoldAnimationId
@@ -95,11 +99,10 @@ local boundHumanoid: Humanoid? = nil
 
 -- ONE manager for the local player's whole lifetime, bound/unbound per life -- the same "construct
 -- once, Bind() per respawn" shape AnimationManager.new's own header recommends for a caller that owns
--- exactly one rig. Nothing else in this codebase has migrated to this module yet (CombatAnimator/
--- FlightAnimator/EmoteAnimator/ParkourAnimator still each hand-roll their own tracks dict), so this
--- manager arbitrates only among ITS OWN claims for now -- a known, pre-existing gap (see
--- AnimationManager's own header on the four modules it is meant to eventually replace), not one this
--- module can close by itself.
+-- exactly one rig. Emote and flight clips now share Client/FX/LocalAnimator's manager, but this one, AttackInputClient's
+-- and ParkourAnimator's are still their own, and CombatAnimator hand-rolls its tracks, so this manager
+-- arbitrates only among ITS OWN claims for now -- a known, pre-existing gap (see AnimationManager's own
+-- header), not one this module can close by itself.
 local manager = AnimationManager.new({ Name = "DefenseClient" })
 
 -- Whether the next press arms a parry, predicted from this client's own key edges and corrected by the
@@ -284,6 +287,15 @@ local function claimBlockHold(fadeIn: number): ()
 	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, manager:GetActiveClip(DEFENSE_LAYER) ~= nil)
 end
 
+-- claimBlockHold, unless the held guard would be a LIE right now: see showHeldGuard's definition below (it needs
+-- the held-body predicates, which are declared further down). Every path that puts the held-guard loop up goes
+-- through this rather than claimBlockHold directly.
+local showHeldGuard: (fadeIn: number) -> ()
+-- A held-guard loop waiting out a stun the guard cannot answer. Bumped by every new claim and every release, so a
+-- scheduled re-raise belonging to an earlier one finds itself stale.
+local holdGeneration = 0
+local holdPending = false
+
 -- Bumped by every new press claim and every release, so a scheduled parry-to-hold handoff that belongs to
 -- an earlier press finds itself stale and does nothing.
 local handoffGeneration = 0
@@ -308,7 +320,7 @@ local function scheduleHandoff(press: ParryPrediction.Press, parryClip: string):
 		-- Only if the swing-up is still what is playing: a correction or a Completed chain may already
 		-- have moved the layer on.
 		if manager:GetActiveClip(DEFENSE_LAYER) == parryClip then
-			claimBlockHold(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+			showHeldGuard(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
 		end
 	end)
 end
@@ -323,11 +335,14 @@ end
 -- key edge is the latency the player feels.
 local function claimGuardPress(): ()
 	local press = predictor:GetHeldPress()
-	-- Any handoff scheduled by an earlier claim is for a swing-up this call is about to replace.
+	-- Any handoff scheduled by an earlier claim is for a swing-up this call is about to replace, and so is a
+	-- held guard still waiting out a stun.
 	handoffGeneration += 1
+	holdGeneration += 1
+	holdPending = false
 	local pressFade = DefenseConstants.Presentation.PressFadeInSeconds
 	if press == nil or not press.Armed then
-		claimBlockHold(pressFade)
+		showHeldGuard(pressFade)
 		return
 	end
 
@@ -357,11 +372,11 @@ local function claimGuardPress(): ()
 			-- layer any more and the armed-idle loop is correctly free to resume.
 			CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
 			if reason == "Completed" and blockHeld then
-				claimBlockHold(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+				showHeldGuard(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
 			elseif reason == "Failed" and blockHeld then
 				-- No swing-up to show (no asset yet, or it failed to load): the guard still goes up.
 				-- Fires synchronously inside the SetClaim above, so this is the press fade, not a handoff.
-				claimBlockHold(pressFade)
+				showHeldGuard(pressFade)
 			end
 		end,
 	})
@@ -393,6 +408,61 @@ end
 -- A held body -- air-held or stunned on the ground -- parries through the stun rather than waiting it out.
 local function parriesThroughStun(now: number): boolean
 	return isAirHeld() or isStunHeld(now)
+end
+
+-- Seconds until a held guard does anything again, 0 when it works now. While this body is held -- stunned on the
+-- ground, or in an air combo -- the server resolves every contact the guard would have blocked as Clean
+-- (DefenseSystem's held-body rule; DefenseConstants.StunParry): only a timed parry counts.
+local function guardIgnoredFor(now: number): number
+	local wait = if isStunHeld(now) then LocalCombatState.StunEndsAt() - now else 0
+	local humanoid = boundHumanoid
+	if humanoid ~= nil then
+		wait = math.max(wait, AirComboAttributes.HeldSecondsLeft(humanoid))
+	end
+	return wait
+end
+
+-- NO HELD-GUARD POSE WHILE THE GUARD DOES NOTHING (2026-10-26, "why am I able to hold block if I'm getting punched
+-- in the face"). Holding the key through a linked M1 string used to show the full guard pose while every punch
+-- landed Clean -- the server ignores a guard on a stunned body by design, but the pose said otherwise, and read as
+-- a broken block. So the loop waits until the stun is over (or a landed parry ends it early: OnReleased) and goes
+-- up then, which is the moment the server's guard starts blocking. The parry swing-up still plays on the press: a
+-- parry IS the answer while stunned, and it is a different clip from the held guard for exactly that reason.
+showHeldGuard = function(fadeIn: number): ()
+	holdGeneration += 1
+	local ignoredFor = guardIgnoredFor(os.clock())
+	if ignoredFor <= 0 then
+		holdPending = false
+		claimBlockHold(fadeIn)
+		return
+	end
+	holdPending = true
+	manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, nil)
+	CombatAnimator.SetActionAnimationActive(ACTION_SOURCE, false)
+	-- Re-checked when it fires: a further hit extends the stun, and this simply waits again.
+	local generation = holdGeneration
+	task.delay(ignoredFor, function()
+		if generation == holdGeneration and blockHeld then
+			showHeldGuard(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+		end
+	end)
+end
+
+-- The body was freed early (a parry out of the stun ends it on the spot): a waiting held guard goes up now.
+local function raiseHeldGuardIfPending(): ()
+	if holdPending and blockHeld then
+		showHeldGuard(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+	end
+end
+
+-- A stun just started or grew while the held-guard loop was up -- a guard break, a backstab, an unblockable hit.
+-- The pose comes down for the same reason it never goes up during one. The parry swing-up is left alone: a live
+-- window still counts through the stun.
+local function dropHeldGuardIfIgnored(): ()
+	-- Only the loop itself: a guard still waiting on a committed body has no clip up yet.
+	if blockHeld and manager:GetActiveClip(DEFENSE_LAYER) == blockClipKey then
+		showHeldGuard(DefenseConstants.Presentation.BlockAnimationFadeSeconds)
+	end
 end
 
 -- Whether a press made at `now` reaches the server on a free body -- the same rule as its bodyCommitted
@@ -465,6 +535,8 @@ local function setBlockHeld(held: boolean): ()
 		guardAnimationDeferred = false
 		guardGeneration += 1
 		handoffGeneration += 1
+		holdGeneration += 1
+		holdPending = false
 		-- SetClaim(layer, source, nil) clears whichever of the two clips is currently active -- and is a
 		-- no-op for a guard that never got as far as animating.
 		manager:SetClaim(DEFENSE_LAYER, BLOCK_SOURCE, nil)
@@ -672,6 +744,8 @@ local function unbind(): ()
 	-- server drops its own registration on the same event. Firing a release for a body that no longer
 	-- exists would be a remote call with nothing to act on.
 	blockHeld = false
+	holdGeneration += 1
+	holdPending = false
 
 	manager:Unbind()
 end
@@ -706,6 +780,9 @@ function DefenseClient.Start(): ()
 	-- able to come down, and a gate that can strand it raised is worse than the one it closes.
 	-- A swing cut short frees the body before the deadline raiseGuardWhenFree scheduled against.
 	LocalCombatState.OnReleased(raiseGuardWhenFree)
+	-- The held-guard loop follows the stun both ways: down when one starts, up the moment one ends early.
+	LocalCombatState.OnReleased(raiseHeldGuardIfPending)
+	LocalCombatState.OnStunned(dropHeldGuardIfIgnored)
 
 	InputRouter.Bind("Block", {
 		Layer = "Gameplay",

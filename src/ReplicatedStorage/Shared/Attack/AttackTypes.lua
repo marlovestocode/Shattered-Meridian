@@ -142,6 +142,13 @@ export type AttackStartedPayload = {
 	-- True when this swing is the LAST M1 of its string, so a predicted hit off it plays the heavier
 	-- string-ender beat (DamageTypes.CombatFeedback.StringEnd) without waiting on the server's verdict.
 	StringEnd: boolean?,
+	-- How far into the swing the server already is when it sends this: a press is started up to
+	-- AttackConstants.Latency.MaxLeadSeconds early to refund the presser's latency, so the swing on the
+	-- server's clock began that long before its confirmation was sent. A client that did not predict the
+	-- swing (a hotbar art, a launcher, an air move, a misprediction) backdates its start by it. nil when
+	-- the swing began this frame. Never read from a CACHED copy a prediction replays -- see
+	-- AttackInputClient.GetSwingStartedAt.
+	ElapsedSeconds: number?,
 }
 
 -- Server -> owner, on every change to which weapon their strings come from: a swap, a draw or sheathe,
@@ -205,10 +212,17 @@ export type ProjectileWireEvent = {
 	Body: { [string]: any }?,
 	LifetimeSeconds: number?,
 	Motion: ProjectileMotion.Motion?,
+	-- Launch only: "Bounce" or "Continue" when the world does not simply destroy the shot, nil for Destroy.
+	Walls: string?,
 	Target: Model?,
-	-- End: why the shot ended ("World", "Range", "Expired", "Hit", ...). Update: "Bounce" for a bounce off
-	-- the world, nil otherwise (ProjectileSimulator's ProjectileEvent) -- presentation only.
+	-- End: why the shot ended ("World", "Range", "Expired", "Hit", "Proximity", "Returned", ...). Update:
+	-- "Bounce" for a bounce off the world, "Return" when it turns for home (Motion is then set), nil
+	-- otherwise (ProjectileSimulator's ProjectileEvent) -- presentation only.
 	Reason: string?,
+	-- Launch/Update: the shot's age at the event (its weave and homing window run on it).
+	Age: number?,
+	-- End: the burst's radius, when it exploded where it ended.
+	Burst: number?,
 }
 
 -- One engine frame's worth of shot changes. SentAt is Workspace:GetServerTimeNow() at the send, so a

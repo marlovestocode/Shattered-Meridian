@@ -56,6 +56,11 @@ StorageConfig.CustomMoveDataStoreName = "CustomMoves_v1"
 StorageConfig.RaceTraitDataStoreName = "RaceTraits_v1"
 StorageConfig.BloodlineDataStoreName = "Bloodlines_v1"
 
+-- World Architect (Server/Systems/WorldArchitectSystem.lua, Server/WorldArchitect/WorldPersistence.lua) -- one store for
+-- world slots (a head key per slot listing its saved generations, plus size-bounded chunk keys per generation) and
+-- the saved-template library (one key per template plus the shared index). See WorldPersistence.lua's header.
+StorageConfig.WorldArchitectDataStoreName = "WorldArchitect_v1"
+
 -- Server publish-version watchdog (Server/Systems/VersionWatchSystem.lua) -- a single small store
 -- holding one fixed key, the highest game.PlaceVersion any server has ever reported booting with.
 -- See that module's own header for why this is enough to detect a publish with no external tooling.

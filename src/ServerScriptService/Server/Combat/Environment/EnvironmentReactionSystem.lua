@@ -45,7 +45,6 @@ local EnvironmentProbe = require(ReplicatedStorage.Shared.Combat.EnvironmentProb
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 
@@ -53,6 +52,7 @@ local AttackRequestSystem = require(script.Parent.Parent.Attack.AttackRequestSys
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("EnvironmentReactionSystem")
 
@@ -330,8 +330,9 @@ function EnvironmentReactionSystem.Init(): ()
 	end
 	assert(DamageSystem.ExtendHitstun ~= nil, "EnvironmentReactionSystem.Init() requires DamageSystem")
 	started = true
-	fxRemote = NetworkBridge.CreateRemoteEvent(EnvironmentConstants.Network.RemoteNames.Fx)
-	cosmeticRemote = NetworkBridge.CreateUnreliableRemoteEvent(EnvironmentConstants.Network.RemoteNames.FxCosmetic)
+	local endpoint = Endpoint.Scope("EnvironmentReactionSystem", logger)
+	fxRemote = endpoint.Push(EnvironmentConstants.Network.RemoteNames.Fx)
+	cosmeticRemote = endpoint.Push(EnvironmentConstants.Network.RemoteNames.FxCosmetic, { Unreliable = true }) :: any
 	EnvironmentReactionSystem.Attach()
 	trove:Add(CombatTick.Register("EnvironmentReactionSystem", function(_deltaTime: number, now: number)
 		EnvironmentReactionSystem.Step(now)

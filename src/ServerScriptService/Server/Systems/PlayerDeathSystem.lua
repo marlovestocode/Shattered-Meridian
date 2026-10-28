@@ -78,12 +78,12 @@ local DeathConstants = require(ReplicatedStorage.Shared.Death.DeathConstants)
 local DeathTypes = require(ReplicatedStorage.Shared.Death.DeathTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local DamageSystem = require(ServerScriptService.Server.Combat.Damage.DamageSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local PlayerDeathSystem = {}
 
@@ -260,7 +260,8 @@ function PlayerDeathSystem.Init(): ()
 	assert(DamageSystem.OnApplied ~= nil, "PlayerDeathSystem.Init() requires DamageSystem to be available")
 	started = true
 
-	noticeRemote = NetworkBridge.CreateRemoteEvent(DeathConstants.Network.RemoteNames.Notice)
+	local endpoint = Endpoint.Scope("PlayerDeathSystem", logger)
+	noticeRemote = endpoint.Push(DeathConstants.Network.RemoteNames.Notice)
 	PlayerDeathSystem.Attach()
 
 	-- `life` is Shared/PlayerLifecycle.lua's per-life Trove: the Died connection goes in it, so the

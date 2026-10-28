@@ -2,30 +2,25 @@
 --[[
 	FlightAnimator.lua
 
-	Owns: loading and playing the LOCAL player's own flight animations (a Hover idle loop, a
-	CruiseLoop for forward flight, a BoostLoop while boosting, and one-shot Takeoff/LandingSoft/
-	LandingHard clips) while their Humanoid's "Flying" Attribute is true. A sibling to
-	Client/FX/CombatAnimator.lua, copying its proven shape (own animation-id registry, own
-	BindCharacter-loads-everything-once, own persistent Heartbeat loop-eligibility evaluator built on
-	the shared Client/FX/AnimationTrackUtil.lua evaluator/freeze-guard the two files now both use,
-	DOMINANT_WEIGHT priority-forcing) rather than folding flight tracks into that module's shared
-	`tracks` dict -- CombatAnimator.lua's own header scopes it to combat, triggered only by
-	CombatClient.lua off server-confirmed combat events; flight is triggered by a Humanoid Attribute
-	from an unrelated caller (Client/Flight/FlightController.lua), and CombatAnimator.
-	FreezeActiveCombatTrack (combat hit-stop) would otherwise incidentally freeze flight animations
-	and vice versa if the two shared one track dict (this is also why each file constructs its OWN
-	FreezeGuard instance from that shared module rather than the two sharing one generation counter
-	-- see FreezeGuard's own header).
+	Owns: the LOCAL player's own flight animations (a Hover idle loop, a CruiseLoop for forward flight, a
+	BoostLoop while boosting, and one-shot Takeoff/LandingSoft/LandingHard clips) while their Humanoid's "Flying"
+	Attribute is true -- as claims on Client/FX/LocalAnimator.lua's AnimationManager. The loops are one exclusive
+	layer (FlightLoop: only one plays), the one-shots another (FlightOneShot: they play over the loop), so the
+	crossfade between loops is the manager's resolution rather than a hand-written evaluator.
 
-	All six Constants.Flight.AnimationIds entries ship as empty-string placeholders (the same
-	wired-but-unauthored convention CombatConstants.AnimationIds already established for Heavy1/
-	Heavy2/etc) -- every play path below degrades to a silent no-op until a real rbxassetid is
-	supplied, no code change needed once one is.
+	It stays apart from CombatAnimator's tracks on purpose: flight is triggered by a Humanoid Attribute from an
+	unrelated caller (Client/Flight/FlightController.lua), and the combat hit-stop must not incidentally freeze a
+	flight clip or the reverse. Combat's hit-stop freezes by animation priority (Action*), and these claims are
+	Core; the landing-impact freeze below names its own layers.
 
-	Does not own: deciding WHEN flight starts/stops or which loop state is active (FlightController.
-	lua's stepFlight computes speed/isBoosting every frame and pushes it in via SetFlightMotion), or
-	the takeoff/landing CLASSIFICATION (soft vs hard, grounded vs airborne -- FlightController.lua's
-	own detection logic decides that and just calls PlayTakeoff/PlayLandingSoft/PlayLandingHard here).
+	All six Constants.Flight.AnimationIds entries ship as placeholders (the same wired-but-unauthored convention
+	CombatConstants.AnimationIds established); an empty id registers as absent, so every play path degrades to a
+	silent no-op until a real rbxassetid is supplied, no code change needed once one is.
+
+	Does not own: deciding WHEN flight starts/stops or which loop state is active (FlightController.lua's stepFlight
+	computes speed/isBoosting every frame and pushes it in via SetFlightMotion), or the takeoff/landing
+	CLASSIFICATION (soft vs hard, grounded vs airborne -- FlightController.lua's own detection logic decides that and
+	just calls PlayTakeoff/PlayLandingSoft/PlayLandingHard here).
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -35,48 +30,77 @@ local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local FlightConstants = require(ReplicatedStorage.Shared.Flight.FlightConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local AnimatorUtil = require(ReplicatedStorage.Shared.AnimatorUtil)
-local AnimationTrackUtil = require(script.Parent.AnimationTrackUtil)
+local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
+local LocalAnimator = require(script.Parent.LocalAnimator)
 
 local logger = Logger.scope("FlightAnimator")
 
 local FlightAnimator = {}
 
-local ANIMATION_IDS = FlightConstants.AnimationIds
-
--- Same reasoning as CombatAnimator.lua's own DOMINANT_WEIGHT: a single Play()-time weight isn't
--- enough for a sustained/held track, since Roblox's default Animate script keeps re-asserting its
--- own track's weight on every Humanoid movement-state change -- the loop evaluator below re-calls
--- AdjustWeight every Heartbeat instead of trusting one Play() call to stick. Now FXConstants.
--- Animation.DominantWeight/Flight -- shared with Server/Combat/BotAnimator.lua and Client/FX/
--- CombatAnimator.lua (DominantWeight) -- see that table's own header in Constants.lua for why these
--- were independently hand-typed here before (ONE_SHOT_FADE_TIME/LOOP_FADE_TIME).
+-- Roblox's default Animate script keeps re-asserting its own track's weight on every Humanoid movement-state
+-- change, so a weight above 1 is asked for and the manager holds it every frame (a Weight above 1 implies
+-- HoldWeight). Shared with CombatAnimator and EmoteAnimator -- see FXConstants.Animation's own header.
 local DOMINANT_WEIGHT = FXConstants.Animation.DominantWeight
 local ONE_SHOT_FADE_TIME = FXConstants.Animation.Flight.OneShotFadeSeconds
 local LOOP_FADE_TIME = FXConstants.Animation.Flight.LoopFadeSeconds
 
-local animationTemplates: { [string]: Animation } = {}
+local LOOP_LAYER = LocalAnimator.Layers.FlightLoop
+local ONE_SHOT_LAYER = LocalAnimator.Layers.FlightOneShot
+local SOURCE = "Flight"
+-- Prefixed so a flight clip name can never collide with another claimant's clip key on the shared manager.
+local CLIP_PREFIX = "Flight/"
+
+local ANIMATION_IDS = FlightConstants.AnimationIds
+
 for name, id in pairs(ANIMATION_IDS) do
-	if id ~= "" then
-		local animation = Instance.new("Animation")
-		animation.Name = name
-		animation.AnimationId = id
-		animationTemplates[name] = animation
-	end
+	LocalAnimator.Manager():Register(CLIP_PREFIX .. name, id)
 end
 
--- Same reasoning as CombatAnimator.lua's own GetPreloadInstances(): Client/Loading/AssetPreloader.
--- lua reuses these template instances rather than constructing its own from Constants.Flight.
--- AnimationIds directly.
-function FlightAnimator.GetPreloadInstances(): { Instance }
-	local instances: { Instance } = {}
-	for _, animation in animationTemplates do
-		table.insert(instances, animation)
-	end
-	return instances
+-- Core, matching CombatAnimator's own reasoning: current default character rigs play their own cycle at Core
+-- priority, which otherwise wins over anything lower.
+local function loopSpec(name: string): AnimationManager.ClipSpec
+	return {
+		Clip = CLIP_PREFIX .. name,
+		Looped = true,
+		FadeIn = LOOP_FADE_TIME,
+		FadeOut = LOOP_FADE_TIME,
+		Weight = DOMINANT_WEIGHT,
+		Priority = Enum.AnimationPriority.Core,
+	}
 end
 
-local tracks: { [string]: AnimationTrack } = {}
+local function oneShotSpec(name: string): AnimationManager.ClipSpec
+	return {
+		Clip = CLIP_PREFIX .. name,
+		Looped = false,
+		FadeIn = ONE_SHOT_FADE_TIME,
+		Weight = DOMINANT_WEIGHT,
+		Priority = Enum.AnimationPriority.Core,
+	}
+end
+
+-- Built once: the loop evaluator below runs every Heartbeat and must not allocate a spec per frame.
+local HOVER_SPEC = loopSpec("Hover")
+local CRUISE_SPEC = loopSpec("CruiseLoop")
+local BOOST_SPEC = loopSpec("BoostLoop")
+local TAKEOFF_SPEC = oneShotSpec("Takeoff")
+local LANDING_SOFT_SPEC = oneShotSpec("LandingSoft")
+local LANDING_HARD_SPEC = oneShotSpec("LandingHard")
+
+-- Client/Loading/AssetPreloader.lua's boot-time preload pass: raw content ids, the same contract
+-- DefenseClient.GetPreloadInstances has (AnimationManager pools its own templates and does not hand them out).
+function FlightAnimator.GetPreloadIds(): { string }
+	local ids: { string } = {}
+	local seen: { [string]: true } = {}
+	for _, id in pairs(ANIMATION_IDS) do
+		if id ~= "" and not seen[id] then
+			seen[id] = true
+			table.insert(ids, id)
+		end
+	end
+	return ids
+end
+
 local currentHumanoid: Humanoid? = nil
 
 -- Pushed every frame by FlightController.lua's stepFlight -- read only by the loop evaluator below.
@@ -84,134 +108,78 @@ local currentSpeed = 0
 local currentlyBoosting = false
 
 function FlightAnimator.BindCharacter(character: Model): ()
-	tracks = {}
 	currentHumanoid = nil
 
-	-- Shared/AnimatorUtil.lua -- the same find-Humanoid/find-or-create-Animator plumbing this
-	-- file's own sibling Client/FX/CombatAnimator.lua and ServerScriptService/Server/Combat/
-	-- BotAnimator.lua need too; see that module's own header for why it's safe to share across the
-	-- client/server boundary (pure Instance manipulation, no authoritative state).
-	local animator = AnimatorUtil.GetOrCreateAnimator(character)
-	if not animator then
+	if not LocalAnimator.Bind(character) then
 		logger:warn("BindCharacter: no Humanoid/Animator available", { character = character.Name })
 		return
 	end
-
-	local humanoid = CharacterUtil.HumanoidOf(character)
-	currentHumanoid = humanoid
-
-	for name, animation in pairs(animationTemplates) do
-		local ok, trackOrError = pcall(function()
-			return animator:LoadAnimation(animation)
-		end)
-		if ok then
-			local track = trackOrError :: AnimationTrack
-			-- Core, matching CombatAnimator.lua's own reasoning: current default character rigs play
-			-- their own cycle at Core priority, which otherwise wins over anything lower.
-			track.Priority = Enum.AnimationPriority.Core
-			if name == "Hover" or name == "CruiseLoop" or name == "BoostLoop" then
-				track.Looped = true
-			end
-			tracks[name] = track
-			logger:debug("Animation loaded", { name = name, length = track.Length })
-		else
-			logger:warn("Failed to load animation", { name = name, errorMessage = tostring(trackOrError) })
-		end
-	end
+	currentHumanoid = CharacterUtil.HumanoidOf(character)
 end
 
-local function playOneShot(name: string): ()
-	local track = tracks[name]
-	if not track then
-		logger:debug("Play: no track loaded yet (no asset id supplied)", { name = name })
-		return
-	end
-	track:Play(ONE_SHOT_FADE_TIME, DOMINANT_WEIGHT)
+local function playOneShot(spec: AnimationManager.ClipSpec): ()
+	LocalAnimator.Manager():Claim(ONE_SHOT_LAYER, SOURCE, spec)
 end
 
 function FlightAnimator.PlayTakeoff(): ()
-	playOneShot("Takeoff")
+	playOneShot(TAKEOFF_SPEC)
 end
 
 function FlightAnimator.PlayLandingSoft(): ()
-	playOneShot("LandingSoft")
+	playOneShot(LANDING_SOFT_SPEC)
 end
 
 function FlightAnimator.PlayLandingHard(): ()
-	playOneShot("LandingHard")
+	playOneShot(LANDING_HARD_SPEC)
 end
 
 -- Called every Heartbeat by FlightController.lua's stepFlight -- just records state for the
--- persistent loop evaluator below to read, same "push state, evaluator re-derives every frame"
--- division of labor as CombatAnimator.lua's StartRunning/StopRunning vs. its own evaluator.
+-- persistent loop evaluator below to read.
 function FlightAnimator.SetFlightMotion(speed: number, isBoosting: boolean): ()
 	currentSpeed = speed
 	currentlyBoosting = isBoosting
 end
 
--- Own generation counter for THIS file's own flight-track freezes (Client/FX/AnimationTrackUtil.
--- lua's FreezeGuard) -- deliberately a separate instance from CombatAnimator.lua's own guard, so an
--- unrelated combat hit-stop can never supersede (or be superseded by) a flight landing-impact
--- freeze's restore timing. See FreezeGuard's own header for why sharing one counter across
--- unrelated track families would be wrong.
-local flightFreezeGuard = AnimationTrackUtil.NewFreezeGuard()
-
--- Reused across every Heartbeat instead of building a fresh `{ {...}, {...}, {...} }` argument each
--- frame -- see CombatAnimator.lua's own locomotionLoopEntries for why (DriveDominantLoop only reads
--- these synchronously within the call and never retains the table).
-local flightLoopEntries: { AnimationTrackUtil.DominantLoopEntry } = {
-	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = LOOP_FADE_TIME, StopFadeSeconds = LOOP_FADE_TIME },
-	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = LOOP_FADE_TIME, StopFadeSeconds = LOOP_FADE_TIME },
-	{ Track = nil, ShouldPlay = false, PlayFadeSeconds = LOOP_FADE_TIME, StopFadeSeconds = LOOP_FADE_TIME },
-}
-
--- Freezes whichever flight tracks are currently playing (landing-impact hit-stop) -- the
--- flight-domain counterpart to CombatAnimator.FreezeActiveCombatTrack, kept as a separate
--- FreezeGuard instance per this module's own header so a combat hit-stop never touches a flight
--- animation or vice versa. Freezes EVERY currently-playing track (not just the first one found --
--- an earlier version of this function `break`-ed after the first hit and restored unconditionally
--- with no generation guard, meaning an overlapping freeze here really could resume early or leave a
--- second frozen track stuck; FreezeGuard fixes both).
+-- Freezes whichever flight clips are currently playing (landing-impact hit-stop). Named layers rather than a
+-- priority set, so a combat hit-stop never touches a flight animation and this never touches a swing. The
+-- manager holds the freeze generation-guarded, so overlapping freezes extend the hold rather than restoring
+-- each other early.
 function FlightAnimator.FreezeActiveFlightTrack(seconds: number): ()
-	local allTracks: { AnimationTrack } = {}
-	for _, track in tracks do
-		table.insert(allTracks, track)
-	end
-	flightFreezeGuard:FreezeTracks(allTracks, seconds)
+	LocalAnimator.Manager():Freeze(seconds, { LOOP_LAYER, ONE_SHOT_LAYER })
 end
 
--- The single, continuously-correct answer to "which flight loop should be playing THIS frame" --
--- same persistent-evaluator shape as CombatAnimator.lua's Walking/Running loop (re-derives from live
--- state every tick rather than being told on start/stop). Hover/CruiseLoop/BoostLoop are mutually
--- exclusive; all three go silent the instant Flying flips false (checked directly here rather than
--- needing FlightController to call an explicit Stop -- same self-contained-watch idiom
--- Client/Camera/ShiftLockCamera.lua uses for RootControlLocked).
+-- The single, continuously-correct answer to "which flight loop should be playing THIS frame": re-derived from
+-- live state every tick rather than being told on start/stop. Hover/CruiseLoop/BoostLoop are mutually exclusive;
+-- all three go silent the instant Flying flips false (checked directly here rather than needing FlightController
+-- to call an explicit Stop -- same self-contained-watch idiom Client/Camera/CombatCamera.lua uses for
+-- RootControlLocked).
+--
+-- A claim is sticky, so this only pushes one when the wanted clip differs from the one playing. Compared against
+-- the manager's active clip rather than a cached "last pushed" value, so a claim lost to a death-and-revive is
+-- simply pushed again.
 RunService.Heartbeat:Connect(function()
-	local hoverTrack = tracks.Hover
-	local cruiseTrack = tracks.CruiseLoop
-	local boostTrack = tracks.BoostLoop
-	if not hoverTrack and not cruiseTrack and not boostTrack then
-		return
+	local manager = LocalAnimator.Manager()
+	local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
+
+	local wanted: AnimationManager.ClipSpec? = nil
+	if flying then
+		if currentSpeed < FlightConstants.HoverSpeedThreshold then
+			wanted = HOVER_SPEC
+		elseif currentlyBoosting then
+			wanted = BOOST_SPEC
+		else
+			wanted = CRUISE_SPEC
+		end
 	end
 
-	local flying = currentHumanoid ~= nil and currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
-	local shouldHover = flying and currentSpeed < FlightConstants.HoverSpeedThreshold
-	local shouldCruise = flying and not shouldHover and not currentlyBoosting
-	local shouldBoost = flying and not shouldHover and currentlyBoosting
-
-	-- Client/FX/AnimationTrackUtil.lua's shared evaluator -- the exact same per-Heartbeat
-	-- Play/AdjustWeight/Stop mechanic CombatAnimator.lua's own Walking/Running crossfade uses; see
-	-- that module's own header. All three loops here share one fade time both ways (no
-	-- toggle-vs-interrupt distinction the way Combat's Walking<->Running has), so PlayFadeSeconds
-	-- and StopFadeSeconds are both just LOOP_FADE_TIME.
-	flightLoopEntries[1].Track = hoverTrack
-	flightLoopEntries[1].ShouldPlay = shouldHover
-	flightLoopEntries[2].Track = cruiseTrack
-	flightLoopEntries[2].ShouldPlay = shouldCruise
-	flightLoopEntries[3].Track = boostTrack
-	flightLoopEntries[3].ShouldPlay = shouldBoost
-
-	AnimationTrackUtil.DriveDominantLoop(flightLoopEntries, DOMINANT_WEIGHT)
+	local active = manager:GetActiveClip(LOOP_LAYER)
+	if wanted == nil then
+		if active ~= nil then
+			manager:Clear(LOOP_LAYER, SOURCE)
+		end
+	elseif active ~= wanted.Clip then
+		manager:Claim(LOOP_LAYER, SOURCE, wanted)
+	end
 end)
 
 return FlightAnimator

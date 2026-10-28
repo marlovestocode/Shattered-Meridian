@@ -1,8 +1,25 @@
 --!strict
 --[[
-	ShiftLockCamera.lua
+	CombatCamera.lua
 
-	Owns: the custom shift-lock camera mode -- combat-philosophy.md's "Established systems" list
+	Owns: the camera in a fight -- the one manager for shift lock and for lock-on's hold on the view, and the order in
+	which their writes land each frame. (Was CombatCamera.lua until 2026-10-27; lock-on's camera pull moved in from
+	Client/Combat/LockOnController.lua the same day. The migration list is docs/architecture/2026-10-27-camera-motion.md.)
+
+	THREE STEPS, IN THIS ORDER, ALL HERE (Client/Config/FrameOrder.lua slots, named as below):
+	  * Shoulder (CombatCameraShoulder, before the composer): the over-the-shoulder framing, converted into the root's frame and handed to
+	    CameraOffsetComposer, which writes just before the camera scripts.
+	  * Aim (CombatCameraAim, before the camera scripts): lock-on's soft pull of the look toward the target. LockOnController.Step runs the lock's
+	    break rules and marker and returns the point; CombatCameraMath.LockOnLook springs the look toward it. Before the
+	    camera scripts, so they apply the player's own input, zoom and occlusion ON TOP of the pulled look: the player can
+	    still glance around and is drawn back. Only a Custom camera is steered; a Scriptable one belongs to someone else.
+	  * Body (CombatCameraBody, after the camera scripts): shift lock's mouse lock and the body's turn toward the camera's yaw -- AFTER the camera scripts,
+	    so with lock-on and shift lock together the body turns toward the already-pulled view and faces the target.
+	Who owns the body's facing instead of shift lock is CombatCameraMath.BodyFacingHeld, one rule over the mirrored flags
+	below. Continuous rotation (CameraRotationComposer) is applied after all three and undone before the next frame's, so
+	no blimp sway, lean or tilt is ever copied into the body or the lock.
+
+	SHIFT LOCK -- combat-philosophy.md's "Established systems" list
 	names the combat camera as bespoke, not default Roblox behavior. Toggled with the ShiftLock
 	keybind (KeybindManager.lua, LeftShift default; the engine's own mouse-lock switch is disabled
 	in default.project.json -- StarterPlayer.EnableMouseLockOption = false -- so both systems can
@@ -12,7 +29,7 @@
 	unsticks), the camera frames over the right shoulder (Humanoid.CameraOffset, eased rather than
 	snapped, so the default camera's zoom and collision handling keep working underneath), and the
 	character's yaw tracks the camera's yaw every frame (AutoRotate off; root CFrame rotation
-	written at RenderPriority.Camera + 1 so it reads the camera's final pose for the frame instead
+	written in the Body step, after the camera scripts, so it reads the camera's final pose for the frame instead
 	of lagging it by one). WASD therefore strafes relative to the camera -- which is exactly what
 	makes Dash's WalkSpeed-burst-plus-held-WASD movement (CombatSystem.lua's handleDashRequest)
 	steerable in a fight instead of a commitment to whichever way the character last faced.
@@ -41,8 +58,8 @@
 	independent and can be active in any combination), the crosshair's own appearance
 	(ShiftLockCrosshair.lua renders; this module only sets the engaged flag it displays), or any
 	Humanoid property the server drives (CombatSystem.lua owns WalkSpeed; this module never touches
-	it -- AutoRotate is the only Humanoid field it writes directly, and CameraOffset is registered
-	through CameraOffsetComposer rather than written directly -- see above).
+	it -- AutoRotate is held off through a Client/Movement/TurnGate claim while engaged, never written
+	directly, and CameraOffset is registered through CameraOffsetComposer -- see above).
 
 	Death/respawn: the toggle survives respawn -- it's a mode preference, not per-life state, same
 	as the engine's own shift lock. While the character is dead or missing the mode *disengages*
@@ -70,7 +87,7 @@
 	SwingTracking.lua) and parkour both turn the body away from the camera for a while, and every time
 	they did the camera slid sideways with the shoulder, then slid back when the body was handed back.
 	On every swing of a string. The offset is now built in the camera's yaw frame and converted into the
-	root's frame just before the composer writes it (updateShoulderOffset, RenderPriority.Camera - 2), so
+	root's frame just before the composer writes it (updateShoulderOffset, the CombatCameraShoulder slot), so
 	turning the body moves the body and not the view. The engage/release ease moved with it: this module
 	now eases a 0..1 blend itself and hands the composer the finished vector.
 
@@ -84,7 +101,7 @@
 	rest while they owned it) brings it round smoothly instead of the one-frame snap it used to take on
 	every swing of a string.
 
-	Logging (Logger.scope("ShiftLockCamera"), Studio-only per Logger.lua): toggle and engage/
+	Logging (Logger.scope("CombatCamera"), Studio-only per Logger.lua): toggle and engage/
 	disengage transitions and character (re)binds only -- nothing logs at render-step frequency.
 
 	Input suspension (2026-08-10, radial emote wheel): SetInputSuspended(owner, true) tells this module to
@@ -128,21 +145,27 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local CombatCameraMath = require(ReplicatedStorage.Shared.CombatCameraMath)
+local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
 local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
-local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local CameraOffsetComposer = require(script.Parent.Parent.FX.CameraOffsetComposer)
+local TurnGate = require(script.Parent.Parent.Movement.TurnGate)
+local LockOnController = require(script.Parent.Parent.Combat.LockOnController)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
-local logger = Logger.scope("ShiftLockCamera")
+local logger = Logger.scope("CombatCamera")
 
-local RENDER_STEP_NAME = "ShiftLockCameraUpdate"
-local OFFSET_STEP_NAME = "ShiftLockCameraOffset"
+local BODY_STEP_NAME = "CombatCameraBody"
+local SHOULDER_STEP_NAME = "CombatCameraShoulder"
+local AIM_STEP_NAME = "CombatCameraAim"
 
-local ShiftLockCamera = {}
+local CombatCamera = {}
 
 -- The player's toggle: what they've asked for. Survives death/respawn (see file header).
 local enabled = false
@@ -240,6 +263,21 @@ local bodyYawVelocity = 0
 -- Below both of these the body is facing the camera and not turning: nothing to write.
 local BODY_YAW_REST_VELOCITY = 0.01
 
+-- The mirrored flags above, gathered for CombatCameraMath.BodyFacingHeld. One table, rewritten in place each frame.
+local facingFlags: CombatCameraMath.FacingFlags = {
+	RootControlLocked = false,
+	PunishLocked = false,
+	Grabbed = false,
+	Mounted = false,
+	Flying = false,
+	ParkourFacingOwned = false,
+	CombatFacingOwned = false,
+}
+
+-- The lock-on pull's spring velocities. Zeroed on every target change (LockOnController.OnTargetChanged), so a new lock
+-- starts from rest rather than inheriting the last one's swing.
+local lookState = CombatCameraMath.NewLookState()
+
 local function setEngaged(nowEngaged: boolean): ()
 	if nowEngaged == engaged then
 		return
@@ -256,23 +294,22 @@ local function setEngaged(nowEngaged: boolean): ()
 		-- MouseLockedCursor texture ("avoid generic Roblox UI styles").
 		UserInputService.MouseIconEnabled = false
 		if humanoid then
-			humanoid.AutoRotate = false
+			TurnGate.Set(humanoid, TurnGate.Owners.ShiftLock, true)
 		end
 		logger:debug("Shift lock engaged")
 	else
 		UserInputService.MouseIconEnabled = true
 		UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 		-- humanoid is nil here when disengaging because the character was just removed -- the
-		-- destroyed humanoid doesn't need its AutoRotate back, and a fresh one spawns with the
-		-- default true anyway.
+		-- destroyed humanoid's claims die with it, and a fresh one spawns with none.
 		if humanoid then
-			humanoid.AutoRotate = true
+			TurnGate.Set(humanoid, TurnGate.Owners.ShiftLock, false)
 		end
 		logger:debug("Shift lock disengaged")
 	end
 end
 
--- The shoulder framing, every frame, just before CameraOffsetComposer writes (Camera - 1) -- so it is
+-- The shoulder framing, every frame, just before CameraOffsetComposer writes -- so it is
 -- converted into the root's frame with THIS frame's root rotation, not last frame's. See the header's
 -- camera-space note.
 --
@@ -364,19 +401,18 @@ local function onRenderStep(deltaTime: number): ()
 	--
 	-- A punish-only lock (see `punishLocked`) is the exception: RootControlLocked is set, but nothing is
 	-- rotating the body, so the camera keeps steering it exactly as it would without shift lock.
-	local lockOwnsFacing = rootControlLocked and not (punishLocked and not grabbed and not mounted)
-	if lockOwnsFacing or flying then
-		bodyYawVelocity = 0
-		return
-	end
-
-	-- See this file's header, "Yaw suspension" section -- Client/Parkour/ParkourMotor.lua owns the
-	-- character's rotation for the duration of an owned traversal, and this write would otherwise
-	-- contest it every render step. Grouped with the rootControlLocked/flying guard above rather than
-	-- folded into it because it is a different owner with a different lifetime, and kept AFTER the
-	-- MouseBehavior re-assert because a suspended YAW is not a suspended MODE: the player is still
+	--
+	-- The traversal and swing-tracking owners are in the same rule (see this file's header, "Yaw suspension"), and it is
+	-- asked AFTER the MouseBehavior re-assert because a suspended YAW is not a suspended MODE: the player is still
 	-- shift-locked and still expects a locked cursor while a mantle plays out.
-	if parkourFacingOwned or combatFacingOwned then
+	facingFlags.RootControlLocked = rootControlLocked
+	facingFlags.PunishLocked = punishLocked
+	facingFlags.Grabbed = grabbed
+	facingFlags.Mounted = mounted
+	facingFlags.Flying = flying
+	facingFlags.ParkourFacingOwned = parkourFacingOwned
+	facingFlags.CombatFacingOwned = combatFacingOwned
+	if CombatCameraMath.BodyFacingHeld(facingFlags) then
 		bodyYawVelocity = 0
 		return
 	end
@@ -423,10 +459,7 @@ local function onRenderStep(deltaTime: number): ()
 	local currentYaw = FlightMath.YawFromFlatDirection(root.CFrame.LookVector)
 	if currentYaw then
 		-- The short way round, so a body facing the other way never spins through 350 degrees.
-		local delta = (yaw - currentYaw) % (2 * math.pi)
-		if delta > math.pi then
-			delta -= 2 * math.pi
-		end
+		local delta = FlightMath.AngleDelta(currentYaw, yaw)
 		if math.abs(delta) < YAW_WRITE_EPSILON_RADIANS and math.abs(bodyYawVelocity) < BODY_YAW_REST_VELOCITY then
 			bodyYawVelocity = 0
 			return
@@ -449,6 +482,31 @@ local function onRenderStep(deltaTime: number): ()
 	root.CFrame = CFrame.new(root.Position) * CFrame.Angles(0, yaw, 0)
 end
 
+-- Lock-on's hold on the view, every frame BEFORE the camera scripts -- see this file's header. Writes only the
+-- look, never the position the camera scripts are about to recompute.
+local function updateAim(deltaTime: number): ()
+	local aim = LockOnController.Step()
+	local camera = Workspace.CurrentCamera
+	local root = rootPart
+	if aim == nil or camera == nil or root == nil or camera.CameraType ~= Enum.CameraType.Custom then
+		CombatCameraMath.ResetLook(lookState)
+		return
+	end
+	local pitch, yaw = CombatCameraMath.LockOnLook(
+		lookState,
+		camera.CFrame.LookVector,
+		camera.Focus.Position,
+		aim,
+		root.Position,
+		deltaTime,
+		LockOnConstants.Camera
+	)
+	if pitch == nil or yaw == nil then
+		return
+	end
+	camera.CFrame = CFrame.new(camera.CFrame.Position) * CFrame.fromOrientation(pitch, yaw, 0)
+end
+
 -- `life` is the per-life Shared/Trove.lua scope Shared/PlayerLifecycle.lua hands every bind. Every
 -- Attribute watch below goes into it, which is a real fix and not just tidying: those three
 -- GetAttributeChangedSignal connections used to be made fresh on every respawn and disconnected never,
@@ -466,6 +524,11 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 
 	humanoid = humanoidInstance
 	rootPart = rootPartInstance
+	-- A respawn fast enough that no render step saw the gap never re-crosses setEngaged's edge, so the
+	-- fresh Humanoid would carry no claim while the mode reads engaged.
+	if engaged then
+		TurnGate.Set(humanoidInstance, TurnGate.Owners.ShiftLock, true)
+	end
 
 	-- A fresh character's Humanoid never carries over the old one's Attributes -- seed from
 	-- whatever the server has already set (normally false/unset on a fresh spawn, but read it
@@ -517,23 +580,7 @@ local function onCharacterAdded(character: Model, humanoidInstance: Humanoid, li
 	-- can land this bind after the motor has already taken the new character.
 	parkourFacingOwned = humanoidInstance:GetAttribute(AttributeConstants.ParkourFacingOwned) == true
 	life:Connect(humanoidInstance:GetAttributeChangedSignal(AttributeConstants.ParkourFacingOwned), function()
-		local nowOwned = humanoidInstance:GetAttribute(AttributeConstants.ParkourFacingOwned) == true
-		parkourFacingOwned = nowOwned
-		-- Parkour just handed rotation back. ParkourMotor.restoreRestorables writes Humanoid.AutoRotate
-		-- back to whatever it captured at the MOMENT parkour first took ownership -- but if this player
-		-- toggled shift lock at any point DURING that traversal, setEngaged (below) already wrote a
-		-- newer AutoRotate underneath it that the capture never saw, and the restore just clobbered that
-		-- with the stale one. The failure mode is exactly "stops turning to face movement": disengaging
-		-- shift lock mid-traversal restores AutoRotate to the shift-locked `false` it captured, and with
-		-- `engaged` now false this module's own per-frame yaw write (below) is ALSO not running to
-		-- compensate -- so nothing rotates the character at all until the next parkour move happens to
-		-- fix it by accident. Reasserting here, from the CURRENT `engaged` rather than a snapshot, is
-		-- what keeps the two independent capture/restore systems from being able to disagree. Skipped
-		-- while something else legitimately owns the body (root-control lock, flight), same guard as the
-		-- per-frame yaw write below -- this module has no business asserting AutoRotate over either.
-		if not nowOwned and not rootControlLocked and not flying then
-			humanoidInstance.AutoRotate = not engaged
-		end
+		parkourFacingOwned = humanoidInstance:GetAttribute(AttributeConstants.ParkourFacingOwned) == true
 	end)
 
 	combatFacingOwned = humanoidInstance:GetAttribute(AttributeConstants.CombatFacingOwned) == true
@@ -553,44 +600,48 @@ end
 -- Editor's Place mode became the second caller, exactly the point the header named): input stays
 -- suspended while ANY owner holds it, so the emote wheel closing cannot hand the mouse back to shift
 -- lock in the middle of a placement, or the reverse.
-function ShiftLockCamera.SetInputSuspended(owner: string, suspended: boolean): ()
+function CombatCamera.SetInputSuspended(owner: string, suspended: boolean): ()
 	suspendedBy[owner] = if suspended then true else nil
 	inputSuspended = next(suspendedBy) ~= nil
 end
 
 -- shiftLockEngaged is CombatFeedback's handle field of the same name (Main.client.lua passes it
 -- through) -- the one UI touchpoint this module has, set only on engage/disengage transitions.
-function ShiftLockCamera.Start(shiftLockEngaged: Fusion.Value<boolean>): ()
-	logger:info("ShiftLockCamera.Start called")
+function CombatCamera.Start(shiftLockEngaged: Fusion.Value<boolean>): ()
+	logger:info("CombatCamera.Start called")
 
 	crosshairEngaged = shiftLockEngaged
 
 	-- See Shared/PlayerLifecycle.lua. This module and FlightCamera were the two that already kept the
 	-- post-yield stale-character re-check by hand; that check is now every caller's, not just theirs.
 	PlayerLifecycle.BindLocalCharacter({
-		Scope = "ShiftLockCamera",
+		Scope = "CombatCamera",
 		OnCharacter = onCharacterAdded,
 		OnCharacterRemoving = onCharacterRemoving,
 	})
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed then
-			return
-		end
-		if not KeybindManager.Matches("ShiftLock", input) then
-			return
-		end
-		enabled = not enabled
-		logger:info("Shift lock toggled", { enabled = enabled })
+	-- System layer: the toggle answered whether or not a panel was open, and still does; the chat-box check stays here.
+	InputRouter.Bind("ShiftLock", {
+		Layer = "System",
+		Began = function(gameProcessed: boolean)
+			if gameProcessed then
+				return
+			end
+			enabled = not enabled
+			logger:info("Shift lock toggled", { enabled = enabled })
+		end,
+	})
+
+	LockOnController.OnTargetChanged(function()
+		CombatCameraMath.ResetLook(lookState)
 	end)
 
-	-- Camera.Value + 1: after the default camera scripts have produced the frame's final camera
-	-- pose, so the yaw the character copies is this frame's, not last frame's.
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 1, onRenderStep)
-	-- Before CameraOffsetComposer (Camera - 1), so the shoulder is converted with this frame's root.
-	RunService:BindToRenderStep(OFFSET_STEP_NAME, Enum.RenderPriority.Camera.Value - 2, updateShoulderOffset)
+	-- See this file's header for the three steps and why they sit where they do.
+	RunService:BindToRenderStep(SHOULDER_STEP_NAME, FrameOrder.Priority("CombatCameraShoulder"), updateShoulderOffset)
+	RunService:BindToRenderStep(AIM_STEP_NAME, FrameOrder.Priority("CombatCameraAim"), updateAim)
+	RunService:BindToRenderStep(BODY_STEP_NAME, FrameOrder.Priority("CombatCameraBody"), onRenderStep)
 
-	logger:info("ShiftLockCamera started")
+	logger:info("CombatCamera started")
 end
 
-return ShiftLockCamera
+return CombatCamera

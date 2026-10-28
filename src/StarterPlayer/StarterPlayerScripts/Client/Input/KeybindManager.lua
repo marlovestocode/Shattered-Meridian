@@ -90,7 +90,7 @@ local INPUT_TYPE_LABELS: { [string]: string } = {
 
 -- Whether `input` matches `keybind` -- shared by Matches() below for both device categories. Safe
 -- to call with keybind = nil (an action with no binding in that category never matches).
-local function keybindMatchesInput(keybind: Types.Keybind?, input: InputObject): boolean
+function KeybindManager.MatchesKeybind(keybind: Types.Keybind?, input: InputObject): boolean
 	if not keybind then
 		return false
 	end
@@ -136,8 +136,8 @@ end
 -- physical InputObject can only ever match one of the two anyway (it has exactly one real
 -- KeyCode/UserInputType), so checking both maps here is always safe, never a double-fire.
 function KeybindManager.Matches(action: Types.KeybindAction, input: InputObject): boolean
-	return keybindMatchesInput(currentBindings[action], input)
-		or keybindMatchesInput(currentGamepadBindings[action], input)
+	return KeybindManager.MatchesKeybind(currentBindings[action], input)
+		or KeybindManager.MatchesKeybind(currentGamepadBindings[action], input)
 end
 
 -- True if EITHER of Roblox's own default jump bindings is currently physically held: Space
@@ -251,6 +251,30 @@ end
 -- disconnect, but it is returned anyway rather than assumed away.
 function KeybindManager.OnChanged(listener: () -> ()): () -> ()
 	return changed:Connect(listener)
+end
+
+-- Whether `input` is the press a vehicle's helm control names (Blimp/Boat `Controls` rows): its gamepad button always,
+-- then its fixed keyboard key, or for the Release row -- whose keyboard half is the live Interact bind rather than a fixed
+-- key -- KeybindManager.Matches on that action. Matches checks BOTH of its maps, which is harmless here and not relied on:
+-- Interact has no plain gamepad binding at all (it is on the chord layer), so the gamepad answer for such a row is the
+-- explicit button and nothing else.
+function KeybindManager.MatchesHelmControl(
+	binding: {
+		Keyboard: Enum.KeyCode?,
+		Action: Types.KeybindAction?,
+		Gamepad: Enum.KeyCode,
+	},
+	input: InputObject
+): boolean
+	if input.KeyCode == binding.Gamepad then
+		return true
+	end
+	local keyboard = binding.Keyboard
+	if keyboard then
+		return input.KeyCode == keyboard
+	end
+	local action = binding.Action
+	return action ~= nil and KeybindManager.Matches(action, input)
 end
 
 return KeybindManager

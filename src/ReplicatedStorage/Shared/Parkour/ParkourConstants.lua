@@ -31,6 +31,8 @@
 	that wants a mutable copy of a table in here.
 ]]
 
+local DebugKeys = require(script.Parent.Parent.Input.DebugKeys)
+
 local ParkourConstants = {}
 
 -- Master switch consulted by Client/Parkour/ParkourController.lua at bind time and by
@@ -642,7 +644,7 @@ ParkourConstants.Ledge = {
 	-- The other end of that same comparison: past this many degrees of divergence, travel is not a
 	-- strafe-along-the-face anymore, it is the character moving substantially AWAY from where they are
 	-- looking -- a backpedal into a wall behind them, most commonly, since shift lock
-	-- (Client/Camera/ShiftLockCamera.lua) makes travel and facing fully independent. That is motion,
+	-- (Client/Camera/CombatCamera.lua) makes travel and facing fully independent. That is motion,
 	-- not a reach, so travel is not even tried as a search direction past this threshold -- only facing
 	-- is, which correctly finds nothing behind the character and leaves the fall uninterrupted. Set
 	-- just SHORT of a right angle: at 90 travel has no forward component left in the character's own
@@ -850,7 +852,7 @@ ParkourConstants.WallRun = {
 	-- cannot catch a backwards wall-run on its own, because ParkourMath.WallTangent ORIENTS the tangent
 	-- to agree with travel -- so travel-vs-tangent can only ever refuse running INTO a wall, never
 	-- running along one the wrong way round. Facing is the independent witness, and under shift lock
-	-- (Client/Camera/ShiftLockCamera.lua) it is a genuinely different vector: WASD is camera-relative
+	-- (Client/Camera/CombatCamera.lua) it is a genuinely different vector: WASD is camera-relative
 	-- with AutoRotate off, so holding S past a wall hands the tangent a perfectly good backward
 	-- direction to run while the character is looking the other way down it. Looser than the travel
 	-- threshold because glancing off-axis mid-approach is normal and shouldn't cost the entry; tight
@@ -1765,29 +1767,20 @@ ParkourConstants.Assists = {
 -- Critical States rule; the design's own constraint was "do not make the camera effects so
 -- aggressive that they interfere with combat."
 ParkourConstants.Camera = {
-	-- Continuous FOV widening, scaled by how far current speed exceeds SprintSpeed. Positive
-	-- (widening) unlike Constants.Camera.Sprint.FOVDelta's narrowing -- that one reads as "focusing"
-	-- for a combat sprint; this one reads as "going fast" for genuine parkour overspeed, and the two
-	-- sum harmlessly through FOVOffset's named slots.
-	SpeedFOVMaxDelta = 7,
-	SpeedFOVEaseSpeed = 5,
-	-- Planar speed at which SpeedFOVMaxDelta is fully applied.
-	SpeedFOVFullAtSpeed = 46,
+	-- The speed FOV, the landing dip and the roll's own writer used to be here; they are Constants.Camera.Motion now
+	-- (Client/Camera/CameraMotion.lua), derived from the measured velocity rather than from parkour's own state.
 
 	SlideFOVDelta = -3.5,
 	SlideFOVEaseSpeed = 9,
 	-- Camera dips slightly during a slide so the low stance reads.
 	SlideCameraDropStuds = 1.1,
+	-- How fast the offset slot eases to and from that drop.
+	SlideDropEaseSpeed = 9,
 
-	-- Wall-run camera tilt, in degrees, applied as camera roll. Small -- a big roll angle is
-	-- disorienting and, mid-fight, actively harmful.
+	-- Wall-run camera tilt, in degrees, applied as camera roll through Client/FX/CameraRotationComposer. Small -- a big
+	-- roll angle is disorienting and, mid-fight, actively harmful.
 	WallRunTiltDegrees = 9,
 	WallRunTiltEaseSpeed = 7,
-
-	-- One-shot vertical camera dip on landing, scaled between the soft and hard cases.
-	LandingDipSoftStuds = 0.25,
-	LandingDipHardStuds = 1.2,
-	LandingDipRecoverSpeed = 9,
 
 	VaultFOVPunchDelta = -2.5,
 	VaultFOVPunchOutSeconds = 0.09,
@@ -1838,12 +1831,13 @@ ParkourConstants.Camera = {
 
 	-- Named FOVOffset/CameraOffsetComposer slot keys this feature owns. Named here so no two parkour
 	-- modules can typo the same slot into two slots.
-	SpeedFOVSlot = "ParkourSpeed",
 	SlideFOVSlot = "ParkourSlide",
 	VaultFOVSlot = "ParkourVault",
 	MantleFOVSlot = "ParkourMantle",
 	DashFOVSlot = "ParkourDash",
 	OffsetSlot = "Parkour",
+	-- The wall-run tilt's slot in CameraRotationComposer.
+	WallTiltSlot = "ParkourTilt",
 }
 
 -- Camera-shake presets, same {Amplitude, Frequency, DurationSeconds} shape Constants.FX.CameraShake
@@ -1851,7 +1845,6 @@ ParkourConstants.Camera = {
 -- than added to that table so the parkour tuning surface stays in one file -- CameraShake.Shake
 -- takes a plain preset table and neither knows nor cares which Constants module it came from.
 ParkourConstants.Shake = {
-	HardLanding = { Amplitude = 0.035, Frequency = 22, DurationSeconds = 0.28 },
 	Vault = { Amplitude = 0.012, Frequency = 26, DurationSeconds = 0.14 },
 	WallJump = { Amplitude = 0.016, Frequency = 24, DurationSeconds = 0.16 },
 	SlideStart = { Amplitude = 0.014, Frequency = 20, DurationSeconds = 0.18 },
@@ -2096,11 +2089,9 @@ ParkourConstants.Debug = {
 	-- Raw, non-rebindable key (the same carve-out KeybindManager.lua documents for jump) -- this is
 	-- dev tooling, deliberately absent from the player-facing rebind list.
 	--
-	-- NOT F9: Roblox binds that to its own developer console at the engine level, so the overlay and
-	-- the console opened together and the console won. F6 is unclaimed by the engine, unclaimed by
-	-- Constants.Keybinds (F8 is OpenBugReport there), and sits in the same "system/meta function-row
-	-- key rather than a gameplay key" band that entry's own header reasons about.
-	ToggleKeyCode = Enum.KeyCode.F6,
+	-- Declared in Shared/Input/DebugKeys.lua with every other raw dev key; DebugKeys.Clashes() checks it
+	-- (NOT F9, which the engine binds to its own developer console -- the overlay's first key lost to it).
+	ToggleKeyCode = DebugKeys.ParkourDebug,
 	-- Adorn appearance for visualized probes.
 	HitColor = Color3.fromRGB(80, 235, 120),
 	MissColor = Color3.fromRGB(235, 90, 90),

@@ -88,10 +88,8 @@ local BlimpTagging = require(ReplicatedStorage.Shared.Blimp.BlimpTagging)
 local BlimpTypes = require(ReplicatedStorage.Shared.Blimp.BlimpTypes)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 local VesselSafety = require(ReplicatedStorage.Shared.Vessel.VesselSafety)
@@ -101,8 +99,12 @@ local BlimpDrive = require(ServerScriptService.Server.Blimp.BlimpDrive)
 local BlimpFlightMode = require(ServerScriptService.Server.Blimp.BlimpFlightMode)
 local BlimpFuel = require(ServerScriptService.Server.Blimp.BlimpFuel)
 local VesselMount = require(ServerScriptService.Server.Vessel.VesselMount)
+local VesselContacts = require(ServerScriptService.Server.Vessel.VesselContacts)
+local VesselDriveMath = require(ServerScriptService.Server.Vessel.VesselDriveMath)
+local VesselWorldEntry = require(ServerScriptService.Server.Vessel.VesselWorldEntry)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local InventorySystem = require(script.Parent.InventorySystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("BlimpSystem")
 
@@ -241,6 +243,9 @@ local dismountRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxDismountPe
 local speedShiftRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxSpeedShiftPerSecond)
 local autopilotRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxAutopilotTogglePerSecond)
 local fuelTransferRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxFuelTransferPerSecond)
+-- GetCurrentMount is asked once per client boot (BlimpController.Start), never polled; this bucket only exists because every
+-- public remote has one, and its ceiling is far above that one call.
+local mountQueryRateLimiter = RateLimiter.New(BlimpConstants.Network.MaxMountQueryPerSecond)
 
 local mountChangedRemote: RemoteEvent? = nil
 local fuelUpdatedRemote: RemoteEvent? = nil
@@ -815,49 +820,8 @@ local function unloadFuel(player: Player, blimp: BlimpRecord): ()
 	})
 end
 
--- The "who" half of the fix for a player launched by holding a movement key into the hull -- see
--- VesselSafety.ClampSpeed's own header for the "why" and onHeartbeatTick's own contact-clamp loop
--- for the "when". `otherPart` is whatever touched the hull, which could be any limb of a rig, not
--- just its HumanoidRootPart -- FindFirstAncestorOfClass("Model") walks up to the character either
--- way, and a hull part or another blimp's hull touching this one resolves to a Model that owns no
--- Player, so both are filtered out for free without any extra check.
-local function onHullTouched(blimp: BlimpRecord, otherPart: BasePart): ()
-	local character = otherPart:FindFirstAncestorOfClass("Model")
-	local player = character and Players:GetPlayerFromCharacter(character)
-	if not player then
-		return
-	end
-	blimp.Contacts[player] = (blimp.Contacts[player] or 0) + 1
-end
-
-local function onHullTouchEnded(blimp: BlimpRecord, otherPart: BasePart): ()
-	local character = otherPart:FindFirstAncestorOfClass("Model")
-	local player = character and Players:GetPlayerFromCharacter(character)
-	if not player then
-		return
-	end
-	local count = blimp.Contacts[player]
-	if not count then
-		return
-	end
-	if count <= 1 then
-		blimp.Contacts[player] = nil
-	else
-		blimp.Contacts[player] = count - 1
-	end
-end
-
--- Tagged models sitting OUTSIDE the world, and the one-shot connection waiting for each to enter it.
--- Keyed by model so a re-tag cannot stack a second listener on the same one.
-local pendingWorldEntry: { [Model]: RBXScriptConnection } = {}
-
-local function cancelPendingWorldEntry(model: Model): ()
-	local connection = pendingWorldEntry[model]
-	if connection then
-		connection:Disconnect()
-		pendingWorldEntry[model] = nil
-	end
-end
+-- Tagged models sitting OUTSIDE the world wait here until they enter it (Server/Vessel/VesselWorldEntry).
+local worldEntry = VesselWorldEntry.New(logger)
 
 -- Anything this System has previously built into a hull, by name. Cleared off a model before it is
 -- registered -- see registerBlimp's own REGISTERING A TEMPLATE header for the state this exists to
@@ -877,19 +841,6 @@ local OWNED_INSTANCE_NAMES: { [string]: boolean } = {
 	[BlimpConstants.Prompt.FuelPromptName] = true,
 	[BlimpConstants.Prompt.UnloadPromptName] = true,
 }
-
--- Returns how many it removed, so the caller can say something when it was not zero -- a hull arriving
--- pre-loaded with this System's own furniture is worth one log line, not silence.
-local function clearInheritedInstances(model: Model): number
-	local removed = 0
-	for _, descendant in model:GetDescendants() do
-		if OWNED_INSTANCE_NAMES[descendant.Name] then
-			descendant:Destroy()
-			removed += 1
-		end
-	end
-	return removed
-end
 
 -- REGISTERING A TEMPLATE IS THE BUG THIS FUNCTION'S FIRST TWO GUARDS EXIST FOR.
 --
@@ -920,27 +871,12 @@ local function registerBlimp(model: Model): ()
 		return
 	end
 
-	if not model:IsDescendantOf(Workspace) then
-		-- Not an error and not a build mistake -- this is the normal state of a VehicleManager template,
-		-- and the whole point is that it stays untouched until a clone of it is standing in the world.
-		-- Watched rather than dropped, so a builder who parks a tagged hull outside Workspace and drags
-		-- it in at runtime still gets a blimp.
-		if not pendingWorldEntry[model] then
-			logger:info("Tagged model is not in the world -- not registering it until it is", {
-				model = model:GetFullName(),
-			})
-			pendingWorldEntry[model] = model.AncestryChanged:Connect(function()
-				if model:IsDescendantOf(Workspace) then
-					cancelPendingWorldEntry(model)
-					registerBlimp(model)
-				end
-			end)
-		end
+	-- A model outside Workspace (a VehicleManager template) is the normal case; it registers when it enters the world.
+	if worldEntry.DeferUntilInWorld(model, registerBlimp) then
 		return
 	end
-	cancelPendingWorldEntry(model)
 
-	local inherited = clearInheritedInstances(model)
+	local inherited = VesselWorldEntry.ClearInherited(model, OWNED_INSTANCE_NAMES)
 	if inherited > 0 then
 		logger:warn("Hull arrived carrying this System's own instances -- stripped before building", {
 			model = model:GetFullName(),
@@ -1060,14 +996,7 @@ local function registerBlimp(model: Model): ()
 	-- and Touched is a per-BasePart signal even though every part here moves rigidly together. See
 	-- BlimpAssembly.Assembly.HullParts's own comment for why Build already hands this list back ready
 	-- to use instead of registerBlimp re-deriving it.
-	for _, part in assembly.HullParts do
-		trove:Connect(part.Touched, function(otherPart: BasePart)
-			onHullTouched(record, otherPart)
-		end)
-		trove:Connect(part.TouchEnded, function(otherPart: BasePart)
-			onHullTouchEnded(record, otherPart)
-		end)
-	end
+	VesselContacts.Watch(trove, assembly.HullParts, record.Contacts)
 
 	for _, station in stations do
 		local prompt = trove:Add(mounter.BuildStationPrompt(station.Part, station.Kind))
@@ -1135,7 +1064,7 @@ local function unregisterBlimp(model: Model): ()
 	-- Dropped first and unconditionally: an untagged model that never made it into the world has no
 	-- record here at all, only the AncestryChanged watch registerBlimp left on it, and returning early
 	-- below would leak exactly that.
-	cancelPendingWorldEntry(model)
+	worldEntry.Cancel(model)
 
 	local record = blimps[model]
 	if not record then
@@ -1211,9 +1140,6 @@ local function pilotedBlimp(player: Player): BlimpRecord?
 end
 
 local function handleSetHelmInput(player: Player, raw: unknown): ()
-	if intentRateLimiter:IsLimited(player) then
-		return
-	end
 	local blimp = pilotedBlimp(player)
 	if not blimp then
 		return
@@ -1236,9 +1162,6 @@ end
 -- seconds to answer shows nothing at all until the gauge moves, and a pilot who presses a key and sees
 -- nothing presses it again.
 local function handleShiftSpeedState(player: Player, raw: unknown): ()
-	if speedShiftRateLimiter:IsLimited(player) then
-		return
-	end
 	local blimp = pilotedBlimp(player)
 	if not blimp then
 		return
@@ -1262,9 +1185,6 @@ end
 -- pilot toggling it off, the hull being abandoned long enough to reach Landing, and unregistration
 -- taking the whole record with it).
 local function handleToggleAutopilot(player: Player): ()
-	if autopilotRateLimiter:IsLimited(player) then
-		return
-	end
 	local blimp = pilotedBlimp(player)
 	if not blimp then
 		return
@@ -1279,9 +1199,6 @@ local function handleToggleAutopilot(player: Player): ()
 end
 
 local function handleRequestDismount(player: Player): ()
-	if dismountRateLimiter:IsLimited(player) then
-		return
-	end
 	BlimpSystem.Dismount(player)
 end
 
@@ -1444,8 +1361,11 @@ local function onHeartbeatTick(deltaTime: number): ()
 		-- is the only place that CAN do this: Step itself is deliberately blind to the real CFrame, so
 		-- only the caller, which already reads Assembly.Root every tick to drive the constraints below,
 		-- is in a position to compare Target against where the hull actually is.
-		local clampedTarget =
-			BlimpDrive.ClampLead(blimp.Drive.Target, blimp.Assembly.Root.Position, BlimpConstants.Drive.MaxLeadStuds)
+		local clampedTarget = VesselDriveMath.ClampLead(
+			blimp.Drive.Target,
+			blimp.Assembly.Root.Position,
+			BlimpConstants.Drive.MaxLeadStuds
+		)
 		if clampedTarget ~= blimp.Drive.Target then
 			-- Written back into Drive, not just applied to the constraint below -- otherwise Step would
 			-- integrate from the UNCLAMPED Target next tick and this would hide one frame of the debt
@@ -1560,42 +1480,37 @@ local function onHeartbeatTick(deltaTime: number): ()
 end
 
 function BlimpSystem.Init(): ()
-	mountChangedRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.MountChanged)
+	local names = BlimpConstants.Network.RemoteNames
+	local endpoint = Endpoint.Scope("BlimpSystem", logger)
+	mountChangedRemote = endpoint.Push(names.MountChanged)
 
-	-- See Network.RemoteNames.GetCurrentMount's own header. No rate limit: called at most once per
-	-- client boot, by BlimpController.Start itself, never polled.
-	local getCurrentMountRemote = NetworkBridge.CreateRemoteFunction(BlimpConstants.Network.RemoteNames.GetCurrentMount)
-	getCurrentMountRemote.OnServerInvoke = RemoteHandler.WrapInvoke(
-		logger,
-		"GetCurrentMount",
-		nil :: BlimpTypes.MountChangedPayload?,
-		handleGetCurrentMount
-	)
+	-- See Network.RemoteNames.GetCurrentMount's own header. nil is "not mounted", and also the answer to a refused or failed call.
+	endpoint.Function({
+		Name = names.GetCurrentMount,
+		Limiter = mountQueryRateLimiter,
+		ErrorResult = nil :: BlimpTypes.MountChangedPayload?,
+		Handler = handleGetCurrentMount,
+	})
 
-	local setHelmInputRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.SetHelmInput)
-	setHelmInputRemote.OnServerEvent:Connect(handleSetHelmInput)
-
-	local shiftSpeedRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.ShiftSpeedState)
-	shiftSpeedRemote.OnServerEvent:Connect(handleShiftSpeedState)
-
-	local toggleAutopilotRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.ToggleAutopilot)
-	toggleAutopilotRemote.OnServerEvent:Connect(handleToggleAutopilot)
-
-	local requestDismountRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.RequestDismount)
-	requestDismountRemote.OnServerEvent:Connect(handleRequestDismount)
+	-- The helm payload and the rung delta are decoded inside their handlers (BlimpDrive.SanitizeHelmInput,
+	-- BlimpSpeedLadder.SanitizeDelta), which own those shapes; Endpoint supplies the limiter, the pcall and the declaration.
+	endpoint.Event({ Name = names.SetHelmInput, Limiter = intentRateLimiter, Handler = handleSetHelmInput })
+	endpoint.Event({ Name = names.ShiftSpeedState, Limiter = speedShiftRateLimiter, Handler = handleShiftSpeedState })
+	endpoint.Event({ Name = names.ToggleAutopilot, Limiter = autopilotRateLimiter, Handler = handleToggleAutopilot })
+	endpoint.Event({ Name = names.RequestDismount, Limiter = dismountRateLimiter, Handler = handleRequestDismount })
 
 	-- Server -> pilot only, never listened to server-side -- see BlimpConstants.Network.RemoteNames.
 	-- FuelUpdated's own comment.
-	fuelUpdatedRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.FuelUpdated)
+	fuelUpdatedRemote = endpoint.Push(names.FuelUpdated)
 
 	-- Server -> whichever player pressed a furnace prompt, never listened to server-side -- see
 	-- BlimpConstants.Network.RemoteNames.FuelTransfer's own comment for why a silent prompt was a bug
 	-- rather than a style.
-	fuelTransferRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.FuelTransfer)
+	fuelTransferRemote = endpoint.Push(names.FuelTransfer)
 
 	-- Server -> everyone aboard one hull, never listened to server-side -- see
 	-- BlimpConstants.Network.RemoteNames.HelmUpdated's own comment.
-	helmUpdatedRemote = NetworkBridge.CreateRemoteEvent(BlimpConstants.Network.RemoteNames.HelmUpdated)
+	helmUpdatedRemote = endpoint.Push(names.HelmUpdated)
 
 	-- Present-at-boot models and future ones through the same function, which is the whole reason
 	-- GetTagged is read before the Added signal is connected rather than after: a model tagged in the
@@ -1638,11 +1553,6 @@ function BlimpSystem.Init(): ()
 		end,
 		OnPlayerRemoving = function(player: Player)
 			BlimpSystem.Dismount(player)
-			intentRateLimiter:Clear(player)
-			dismountRateLimiter:Clear(player)
-			speedShiftRateLimiter:Clear(player)
-			autopilotRateLimiter:Clear(player)
-			fuelTransferRateLimiter:Clear(player)
 		end,
 	})
 

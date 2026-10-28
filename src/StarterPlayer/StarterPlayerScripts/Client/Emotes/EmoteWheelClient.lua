@@ -49,12 +49,12 @@
 	MouseIconEnabled to true for the open window, restoring whatever was captured at open time on
 	close.
 
-	The one real coordination hazard: Client/Camera/ShiftLockCamera.lua is already a canonical writer
+	The one real coordination hazard: Client/Camera/CombatCamera.lua is already a canonical writer
 	of MouseBehavior -- while its own `engaged` is true, it re-asserts MouseBehavior = LockCenter on
 	EVERY render step (see that file's header on why once isn't enough), which would silently fight
 	this module's own Default write one frame later if left alone. Rather than duplicating that
 	re-assertion or guessing at a priority order, this module now coordinates with it directly:
-	ShiftLockCamera.SetInputSuspended("EmoteWheel", true/false) tells that module to skip its own per-frame
+	CombatCamera.SetInputSuspended("EmoteWheel", true/false) tells that module to skip its own per-frame
 	MouseBehavior/yaw writes for exactly this module's open/close window, the same "named continuous
 	slot" spirit CameraOffsetComposer/FOVOffset already use for camera properties with more than one
 	writer -- MouseBehavior just doesn't have that generalized composer today, so this is a direct,
@@ -63,7 +63,7 @@
 
 	NEEDS A LIVE STUDIO PLAYTEST -- selene/stylua/TestEZ can't tell us whether the wheel actually
 	feels like a GTA-style wheel in play (cursor responsiveness, whether the free cursor reads as
-	comfortable at various sensitivities, whether ShiftLockCamera's suspend/resume is ever visibly
+	comfortable at various sensitivities, whether CombatCamera's suspend/resume is ever visibly
 	glitchy on rapid open/close). The two thumbstick numbers below (STICK_SELECT_THRESHOLD,
 	STICK_CANCEL_THRESHOLD) are in the same position and cannot be sized from a spec either -- they
 	are starting points chosen to be obviously separated, not measured ones. Say so explicitly
@@ -86,15 +86,15 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Trove = require(ReplicatedStorage.Shared.Trove)
-local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local EmoteRegistry = require(ReplicatedStorage.Shared.Emotes.EmoteRegistry)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local EmoteController = require(script.Parent.EmoteController)
 local EmoteWheelModule = require(script.Parent.Parent.UI.Screens.EmoteWheel)
 local WheelSelection = require(script.Parent.Parent.UI.Screens.EmoteWheel.WheelSelection)
 local ClientStateModule = require(script.Parent.Parent.UI.State.ClientState)
-local ShiftLockCamera = require(script.Parent.Parent.Camera.ShiftLockCamera)
+local CombatCamera = require(script.Parent.Parent.Camera.CombatCamera)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 local Surface = require(script.Parent.Parent.UI.Shell.Surface)
 
@@ -200,7 +200,7 @@ end
 -- same service, so a higher-priority Sink is the supported way to take it: it does not disable the
 -- camera, reconfigure the PlayerModule, or leave any state to restore -- unbinding gives the stick
 -- straight back. The same "coordinate with the canonical owner instead of fighting it" contract
--- Camera/ShiftLockCamera.SetInputSuspended already gives this module for MouseBehavior, applied to
+-- Camera/CombatCamera.SetInputSuspended already gives this module for MouseBehavior, applied to
 -- the one input the camera and the wheel would otherwise both read.
 --
 -- Priority: High (3000) against the camera's own Default (2000). The shipped PlayerModule binds
@@ -282,7 +282,7 @@ local function closeWheel(handle: EmoteWheelHandle): ()
 	handle.State.IsOpen:set(false)
 	handle.State.SelectedIndex:set(nil)
 
-	ShiftLockCamera.SetInputSuspended("EmoteWheel", false)
+	CombatCamera.SetInputSuspended("EmoteWheel", false)
 	UserInputService.MouseBehavior = savedMouseBehavior
 	UserInputService.MouseIconEnabled = savedMouseIconEnabled
 
@@ -323,7 +323,8 @@ end
 -- legible message, and a toast over the helm HUD would be answering a question nobody asked.
 local function isMounted(): boolean
 	local _, humanoid = CharacterUtil.LiveRig(Players.LocalPlayer)
-	return humanoid ~= nil and humanoid:GetAttribute(AttributeConstants.Mounted) == true
+	-- The same row the server's RequestPlay refuses on (BodyRestraint "Emote").
+	return BodyRestraint.Restrained(humanoid, "Emote")
 end
 
 local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
@@ -347,7 +348,7 @@ local function openWheel(handle: EmoteWheelHandle, clientState: ClientState): ()
 
 	savedMouseBehavior = UserInputService.MouseBehavior
 	savedMouseIconEnabled = UserInputService.MouseIconEnabled
-	ShiftLockCamera.SetInputSuspended("EmoteWheel", true)
+	CombatCamera.SetInputSuspended("EmoteWheel", true)
 	sinkCameraStick()
 	UserInputService.MouseBehavior = Enum.MouseBehavior.Default
 	UserInputService.MouseIconEnabled = true

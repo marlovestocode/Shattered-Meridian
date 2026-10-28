@@ -63,7 +63,6 @@
 ]]
 
 local CollectionService = game:GetService("CollectionService")
-local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 local Workspace = game:GetService("Workspace")
@@ -75,7 +74,6 @@ local BoatTypes = require(ReplicatedStorage.Shared.Boat.BoatTypes)
 local BoatWind = require(ReplicatedStorage.Shared.Boat.BoatWind)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
@@ -88,7 +86,11 @@ local BoatDrive = require(ServerScriptService.Server.Boat.BoatDrive)
 local BoatHullMode = require(ServerScriptService.Server.Boat.BoatHullMode)
 local BoatWater = require(ServerScriptService.Server.Boat.BoatWater)
 local VesselMount = require(ServerScriptService.Server.Vessel.VesselMount)
+local VesselContacts = require(ServerScriptService.Server.Vessel.VesselContacts)
+local VesselDriveMath = require(ServerScriptService.Server.Vessel.VesselDriveMath)
+local VesselWorldEntry = require(ServerScriptService.Server.Vessel.VesselWorldEntry)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
+local Endpoint = require(ServerScriptService.Server.Network.Endpoint)
 
 local logger = Logger.scope("BoatSystem")
 
@@ -406,43 +408,8 @@ local function mount(player: Player, boat: BoatRecord, station: StationRecord): 
 	logger:info("Mounted", { player = player.Name, model = boat.Model.Name, kind = station.Kind })
 end
 
-local function onHullTouched(boat: BoatRecord, otherPart: BasePart): ()
-	local character = otherPart:FindFirstAncestorOfClass("Model")
-	local player = character and Players:GetPlayerFromCharacter(character)
-	if not player then
-		return
-	end
-	boat.Contacts[player] = (boat.Contacts[player] or 0) + 1
-end
-
-local function onHullTouchEnded(boat: BoatRecord, otherPart: BasePart): ()
-	local character = otherPart:FindFirstAncestorOfClass("Model")
-	local player = character and Players:GetPlayerFromCharacter(character)
-	if not player then
-		return
-	end
-	local count = boat.Contacts[player]
-	if not count then
-		return
-	end
-	if count <= 1 then
-		boat.Contacts[player] = nil
-	else
-		boat.Contacts[player] = count - 1
-	end
-end
-
--- Tagged models sitting OUTSIDE the world, and the one-shot connection waiting for each to enter it.
--- Keyed by model so a re-tag cannot stack a second listener on the same one.
-local pendingWorldEntry: { [Model]: RBXScriptConnection } = {}
-
-local function cancelPendingWorldEntry(model: Model): ()
-	local connection = pendingWorldEntry[model]
-	if connection then
-		connection:Disconnect()
-		pendingWorldEntry[model] = nil
-	end
-end
+-- Tagged models sitting OUTSIDE the world wait here until they enter it (Server/Vessel/VesselWorldEntry).
+local worldEntry = VesselWorldEntry.New(logger)
 
 -- Anything this System has previously built into a hull, by name. Cleared off a model before it is
 -- registered -- see registerBoat's own REGISTERING A TEMPLATE header for the state this exists to
@@ -456,19 +423,6 @@ local OWNED_INSTANCE_NAMES: { [string]: boolean } = {
 	BoatDriveOrientation = true,
 	[BoatConstants.Prompt.StationPromptName] = true,
 }
-
--- Returns how many it removed, so the caller can say something when it was not zero -- a hull arriving
--- pre-loaded with this System's own furniture is worth one log line, not silence.
-local function clearInheritedInstances(model: Model): number
-	local removed = 0
-	for _, descendant in model:GetDescendants() do
-		if OWNED_INSTANCE_NAMES[descendant.Name] then
-			descendant:Destroy()
-			removed += 1
-		end
-	end
-	return removed
-end
 
 -- REGISTERING A TEMPLATE IS THE BUG THIS FUNCTION'S FIRST TWO GUARDS EXIST FOR, and it is not
 -- hypothetical here -- it is a bug this codebase has already shipped once, on blimps, and the reasoning
@@ -489,26 +443,12 @@ local function registerBoat(model: Model): ()
 		return
 	end
 
-	if not model:IsDescendantOf(Workspace) then
-		-- Not an error and not a build mistake -- this is the normal state of a VehicleManager template.
-		-- Watched rather than dropped, so a builder who parks a tagged hull outside Workspace and drags
-		-- it in at runtime still gets a boat.
-		if not pendingWorldEntry[model] then
-			logger:info("Tagged model is not in the world -- not registering it until it is", {
-				model = model:GetFullName(),
-			})
-			pendingWorldEntry[model] = model.AncestryChanged:Connect(function()
-				if model:IsDescendantOf(Workspace) then
-					cancelPendingWorldEntry(model)
-					registerBoat(model)
-				end
-			end)
-		end
+	-- A model outside Workspace (a VehicleManager template) is the normal case; it registers when it enters the world.
+	if worldEntry.DeferUntilInWorld(model, registerBoat) then
 		return
 	end
-	cancelPendingWorldEntry(model)
 
-	local inherited = clearInheritedInstances(model)
+	local inherited = VesselWorldEntry.ClearInherited(model, OWNED_INSTANCE_NAMES)
 	if inherited > 0 then
 		logger:warn("Hull arrived carrying this System's own instances -- stripped before building", {
 			model = model:GetFullName(),
@@ -593,14 +533,7 @@ local function registerBoat(model: Model): ()
 
 	-- Wired on every hull part, not just Root -- a big hull can be touched anywhere along her length,
 	-- and Touched is a per-BasePart signal even though every part here moves rigidly together.
-	for _, part in assembly.HullParts do
-		trove:Connect(part.Touched, function(otherPart: BasePart)
-			onHullTouched(record, otherPart)
-		end)
-		trove:Connect(part.TouchEnded, function(otherPart: BasePart)
-			onHullTouchEnded(record, otherPart)
-		end)
-	end
+	VesselContacts.Watch(trove, assembly.HullParts, record.Contacts)
 
 	for _, station in stations do
 		local prompt = trove:Add(mounter.BuildStationPrompt(station.Part, station.Kind))
@@ -628,7 +561,7 @@ local function unregisterBoat(model: Model): ()
 	-- Dropped first and unconditionally: an untagged model that never made it into the world has no
 	-- record here at all, only the AncestryChanged watch registerBoat left on it, and returning early
 	-- below would leak exactly that.
-	cancelPendingWorldEntry(model)
+	worldEntry.Cancel(model)
 
 	local record = boats[model]
 	if not record then
@@ -684,9 +617,6 @@ local function pilotedBoat(player: Player): BoatRecord?
 end
 
 local function handleSetHelmInput(player: Player, raw: unknown): ()
-	if intentRateLimiter:IsLimited(player) then
-		return
-	end
 	local boat = pilotedBoat(player)
 	if not boat then
 		return
@@ -701,9 +631,6 @@ end
 -- Moves the sails. A signed rung delta, or 0 to furl outright -- see VesselSpeedLadder.Shift, which owns
 -- both meanings.
 local function handleShiftSailState(player: Player, raw: unknown): ()
-	if sailShiftRateLimiter:IsLimited(player) then
-		return
-	end
 	local boat = pilotedBoat(player)
 	if not boat then
 		return
@@ -717,9 +644,6 @@ local function handleShiftSailState(player: Player, raw: unknown): ()
 end
 
 local function handleToggleAdrift(player: Player): ()
-	if adriftRateLimiter:IsLimited(player) then
-		return
-	end
 	local boat = pilotedBoat(player)
 	if not boat then
 		return
@@ -729,9 +653,6 @@ local function handleToggleAdrift(player: Player): ()
 end
 
 local function handleRequestDismount(player: Player): ()
-	if dismountRateLimiter:IsLimited(player) then
-		return
-	end
 	BoatSystem.Dismount(player)
 end
 
@@ -817,7 +738,7 @@ local function onHeartbeatTick(deltaTime: number): ()
 		-- Fed back into the state, not just clipped on the way to the constraint -- see
 		-- BoatDrive.ClampLead and BlimpDrive's own header: clipping only the output hides one frame of
 		-- the debt and keeps banking the rest.
-		local clamped = BoatDrive.ClampLead(boat.Drive.Target, root.Position, BoatConstants.Drive.MaxLeadStuds)
+		local clamped = VesselDriveMath.ClampLead(boat.Drive.Target, root.Position, BoatConstants.Drive.MaxLeadStuds)
 		if clamped ~= boat.Drive.Target then
 			boat.Drive.Target = clamped
 		end
@@ -901,23 +822,20 @@ end
 function BoatSystem.Init(): ()
 	BoatWater.Start()
 
-	mountChangedRemote = NetworkBridge.CreateRemoteEvent(BoatConstants.Network.RemoteNames.MountChanged)
+	local names = BoatConstants.Network.RemoteNames
+	local endpoint = Endpoint.Scope("BoatSystem", logger)
+	mountChangedRemote = endpoint.Push(names.MountChanged)
 
-	local setHelmInputRemote = NetworkBridge.CreateRemoteEvent(BoatConstants.Network.RemoteNames.SetHelmInput)
-	setHelmInputRemote.OnServerEvent:Connect(handleSetHelmInput)
-
-	local shiftSailRemote = NetworkBridge.CreateRemoteEvent(BoatConstants.Network.RemoteNames.ShiftSailState)
-	shiftSailRemote.OnServerEvent:Connect(handleShiftSailState)
-
-	local toggleAdriftRemote = NetworkBridge.CreateRemoteEvent(BoatConstants.Network.RemoteNames.ToggleAdrift)
-	toggleAdriftRemote.OnServerEvent:Connect(handleToggleAdrift)
-
-	local requestDismountRemote = NetworkBridge.CreateRemoteEvent(BoatConstants.Network.RemoteNames.RequestDismount)
-	requestDismountRemote.OnServerEvent:Connect(handleRequestDismount)
+	-- The helm payload and the rung delta are decoded inside their handlers (BoatDrive.SanitizeHelmInput,
+	-- BoatSailLadder.SanitizeDelta), which own those shapes; Endpoint supplies the limiter, the pcall and the declaration.
+	endpoint.Event({ Name = names.SetHelmInput, Limiter = intentRateLimiter, Handler = handleSetHelmInput })
+	endpoint.Event({ Name = names.ShiftSailState, Limiter = sailShiftRateLimiter, Handler = handleShiftSailState })
+	endpoint.Event({ Name = names.ToggleAdrift, Limiter = adriftRateLimiter, Handler = handleToggleAdrift })
+	endpoint.Event({ Name = names.RequestDismount, Limiter = dismountRateLimiter, Handler = handleRequestDismount })
 
 	-- Server -> everyone aboard one hull, never listened to server-side -- see
 	-- BoatConstants.Network.RemoteNames.HelmUpdated's own comment.
-	helmUpdatedRemote = NetworkBridge.CreateRemoteEvent(BoatConstants.Network.RemoteNames.HelmUpdated)
+	helmUpdatedRemote = endpoint.Push(names.HelmUpdated)
 
 	-- Present-at-boot models and future ones through the same function, which is the whole reason
 	-- GetTagged is read before the Added signal is connected rather than after: a model tagged in the
@@ -961,10 +879,6 @@ function BoatSystem.Init(): ()
 		end,
 		OnPlayerRemoving = function(player: Player)
 			BoatSystem.Dismount(player)
-			intentRateLimiter:Clear(player)
-			dismountRateLimiter:Clear(player)
-			sailShiftRateLimiter:Clear(player)
-			adriftRateLimiter:Clear(player)
 		end,
 	})
 

@@ -342,9 +342,15 @@ DefenseConstants.StunParry = {
 -- waiting out whatever was left of the swing that got cut.
 --
 -- WHEN IT IS A CLASH -- and this is deliberately NOT a time window. Two Clean melee contacts:
---   * in ONE batch (one server frame) that are mutual -- each one's attacker is the other's defender; or
+--   * that are mutual -- each one's attacker is the other's defender -- and found at the SAME instant (one
+--     engine substep: the two hits genuinely landed together); or
 --   * a Clean melee contact on a defender whose own swing is in its ACTIVE window with a volume that
---     already reaches the attacker (within ReachMarginStuds -- HitboxEngine.ActiveSwingReaches).
+--     already reaches the attacker (within ReachMarginStuds -- HitboxEngine.ActiveSwingReaches), or a beat
+--     from opening (the close-time rule below). This is the CLASH WINDOW, measured when the hit lands.
+-- OUTSIDE IT, THE EARLIER HIT WINS (2026-10-27). A hit that lands before the other swing is inside the
+-- window stuns, and the stun cancels that swing completely: anything it touches later -- later in the same
+-- frame, or while the earlier hit waits out a lag rewind hold -- is dropped (DefenseSystem.cutByEarlierHit).
+-- A mutual pair a substep apart used to clash; now the first one lands and the second never does.
 -- A defender still WINDING UP loses, however close. That is load-bearing: a defender mashing out of
 -- hitstun is ~0.06s from Active when the attacker's next M1 lands (the M1 read is tuned to sit just
 -- under the weapon's own windup -- see DamageConstants.Hitstun), so any time window wide enough to be
@@ -364,6 +370,10 @@ DefenseConstants.Clash = {
 	-- Under one blocked hit's DrainPerPowerLevel (18), so trading blades is cheaper than turtling but a
 	-- player who clashes every exchange still wears their guard down.
 	GuardDamage = 12,
+	-- A clash never takes a guard below this, so it can never empty one: it is a neutral exchange, and the
+	-- regen block it starts (spendsGuard) already keeps the pool low, so the next block still breaks it. A
+	-- guard already under the floor is left where it is.
+	GuardFloor = 1,
 
 	-- THE CLOSE-TIME RULE (2026-10-26). A hit also clashes when the defender's own swing was a beat from
 	-- opening: still in its windup, WindowSeconds or less from Active, with the attacker within RangeStuds.
@@ -429,7 +439,7 @@ DefenseConstants.Evade = {
 -- a blank id plays nothing (WeaponDefenseAnimations.GetClash). Client presentation only.
 DefenseConstants.ClashAnimationId = ""
 
-DefenseConstants.ParryAnimationId ="rbxassetid://136786601080156"
+DefenseConstants.ParryAnimationId = "rbxassetid://136786601080156"
 
 -- THE PARRY WAS NEVER ARMED IN PLAY, and this table is the fix (2026-09-28). ParryWindows fails closed:
 -- an animation id with no ParryStart/ParryClose markers and no registration gets NO window, so every

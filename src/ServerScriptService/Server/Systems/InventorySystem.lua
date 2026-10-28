@@ -49,13 +49,14 @@ local InventoryModel = require(ReplicatedStorage.Shared.Inventory.InventoryModel
 local ItemCatalog = require(ReplicatedStorage.Shared.Inventory.ItemCatalog)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Schema = require(ReplicatedStorage.Shared.Schema)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponRoster = require(ReplicatedStorage.Shared.Combat.WeaponRoster)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("InventorySystem")
 
@@ -78,8 +79,8 @@ InventorySystem.OnLoaded = onLoaded
 local started = false
 local snapshotRemote: RemoteEvent? = nil
 local actionLimiter = RateLimiter.New(InventoryConstants.Network.MaxActionsPerSecondPerPlayer)
-local revisions: { [Player]: number } = {}
-local pushPending: { [Player]: boolean } = {}
+local revisions: { [Player]: number } = PlayerScoped.New("InventorySystem.revisions")
+local pushPending: { [Player]: boolean } = PlayerScoped.New("InventorySystem.pushPending")
 
 -- The item rules this server applies. Catalog first; then the weapon-only roster check described in the
 -- header. Resolved at CALL time, so a roster that finishes starting after this module loads is honoured.
@@ -298,6 +299,7 @@ local function onProfileLoaded(player: Player): ()
 end
 
 function InventorySystem.Init(): ()
+	PlayerStateSystem.Register("Inventory", pushNow)
 	if started then
 		return
 	end
@@ -323,15 +325,6 @@ function InventorySystem.Init(): ()
 			onProfileLoaded(player)
 		end
 	end
-
-	PlayerLifecycle.BindAllPlayers({
-		Scope = "InventorySystem",
-		OnPlayerRemoving = function(player: Player)
-			actionLimiter:Clear(player)
-			revisions[player] = nil
-			pushPending[player] = nil
-		end,
-	})
 
 	logger:info("InventorySystem.Init() complete")
 end

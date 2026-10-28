@@ -14,8 +14,11 @@
 	                 PLACEMENT  the anchor, the offset and the rotation, and the in-world tools
 	                 TARGETS    how many bodies one swing may take
 	    projectile   BODY       weapon presets, the body's shape chips and its measurements, a scale row
-	                 VOLLEY / FLIGHT / HOMING / COLLISION / PARRY
-	                 SPAWN      the anchor, the offset, the direction it fires and the aim, the in-world tools
+	                 SPAWN      the anchor (or the target) the offset is measured from, the offset, the
+	                            direction it fires, the lead and the aim, the in-world tools
+	                 VOLLEY     the behaviour recipes ("Start from"), the pattern and its formation
+	                 WAVES / FLIGHT / PATH (weave, return) / HOMING / COLLISION / ON END (burst, split) /
+	                 PARRY
 
 	The movement locks are not here any more: what the thrower is held to is the Timing tab's COMMITMENT.
 
@@ -42,8 +45,15 @@
 	the stored offset, the presets and Place mode are unchanged.
 
 	A PROJECTILE'S SPAWN SITS UNDER ITS BODY, the same second place a melee move's PLACEMENT has, and the
-	three groups an author tunes least -- HOMING, COLLISION, PARRY -- start folded (each says what it is set
-	to in its heading, so folded still reads). The "Start from" presets describe themselves on hover.
+	groups an author tunes least -- WAVES, PATH, HOMING, COLLISION, ON END, PARRY -- start folded (each says
+	what it is set to in its heading, so folded still reads). The "Start from" presets describe themselves on
+	hover. Two "Start from" rows, two different jobs: BODY's sets what flies, VOLLEY's sets how it behaves
+	(ProjectileTypes.Presets / Recipes), and neither touches the other's fields.
+
+	THE RULE ABOVE HOLDS FOR EVERY 2026-10-26 FIELD: a field shows only while it can take effect (Columns for a
+	Grid, the wave timings once there is more than one wave, the split's numbers once it splits), and a hidden
+	value is kept. What still cannot take effect as set -- a converge on shots that share one origin, a return
+	after the lifetime -- is a sentence in the notes (ProjectileTypes.Warnings), not a refusal.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -115,7 +125,20 @@ local OPTION_TEXT: { [string]: string } = {
 	Fan = "Fan",
 	Horizontal = "Row",
 	Vertical = "Column",
-	Radial = "Ring",
+	Radial = "Cone",
+	Grid = "Grid",
+	Circle = "Circle",
+	Follow = "Follow thrower",
+	Fixed = "Fixed aim",
+	Path = "Along path",
+	Displacement = "Straight line",
+	Never = "Never",
+	Impact = "Impact",
+	Expire = "Expire",
+	Always = "Always",
+	Every = "Every shot",
+	SplitOnly = "Split only",
+	OriginalOnly = "Original only",
 	Facing = "Body facing",
 	Anchor = "Anchor facing",
 	Target = "At target",
@@ -135,9 +158,18 @@ local OPTION_TEXT: { [string]: string } = {
 	Mirror = "Mirror",
 }
 
-local function optionsOf(values: { any }): { Fields.Option }
-	return Fields.OptionsOf(values, OPTION_TEXT)
+-- Option lists whose values collide with another list's (a weave's Horizontal is not a Row; a spawn's
+-- Anchor is not "Anchor facing") carry their own words.
+local WEAVE_PLANE_TEXT: { [string]: string } = { Horizontal = "Side to side", Vertical = "Up and down" }
+local SPAWN_FROM_TEXT: { [string]: string } = { Anchor = "The anchor", Target = "At the target" }
+local HEIGHT_FROM_TEXT: { [string]: string } = { Spawn = "The spawn point", Ground = "The ground" }
+
+local function optionsOf(values: { any }, text: { [string]: string }?): { Fields.Option }
+	return Fields.OptionsOf(values, text or OPTION_TEXT)
 end
+
+local RECIPE_OPTIONS = presetOptions(ProjectileTypes.Recipes :: any)
+local RECIPE_TEXT = presetDescriptions(ProjectileTypes.Recipes :: any)
 
 -- Per dimension: its default label, unit and step sizes, in the order they are shown.
 local DIMENSIONS = {
@@ -319,11 +351,12 @@ local function HitboxTab(
 		values: { any },
 		layoutOrder: number,
 		shown: UsedAs<boolean>?,
-		hint: string?
+		hint: string?,
+		text: { [string]: string }?
 	): Frame
 		return Fields.Chips(scope, context, {
 			Label = label,
-			Options = optionsOf(values),
+			Options = optionsOf(values, text),
 			Hint = hint,
 			LayoutOrder = layoutOrder,
 			Visible = shown,
@@ -519,15 +552,60 @@ local function HitboxTab(
 			)
 		end
 		if projectile then
+			-- What the offset is measured from: second, right under the anchor it may replace. (Order 2 is
+			-- the Default move's anchor fact, which a projectile move never shows.)
 			table.insert(
 				fields,
 				specChips(
-					"SpawnDirection",
-					"Fires",
-					ProjectileTypes.SpawnDirections,
-					10,
+					"SpawnFrom",
+					"Measured from",
+					ProjectileTypes.SpawnFroms,
+					2,
 					nil,
-					Copy.Hints.SpawnDirection
+					Copy.Hints.SpawnFrom,
+					SPAWN_FROM_TEXT
+				)
+			)
+			-- Height after the offset it lifts: world up, which the offset's own Up (the anchor's) is not.
+			table.insert(
+				fields,
+				specNumber(
+					"SpawnHeight",
+					"Spawn height",
+					"studs, world up",
+					{ 0.5, 5 },
+					2,
+					6,
+					nil,
+					Copy.Hints.SpawnHeight
+				)
+			)
+			table.insert(
+				fields,
+				specChips(
+					"HeightFrom",
+					"Height measured from",
+					ProjectileTypes.HeightFroms,
+					7,
+					nil,
+					Copy.Hints.HeightFrom,
+					HEIGHT_FROM_TEXT
+				)
+			)
+			table.insert(
+				fields,
+				specChips("SpawnDirection", "Fires", ProjectileTypes.SpawnDirections, 9, nil, Copy.Hints.SpawnDirection)
+			)
+			table.insert(
+				fields,
+				specToggle(
+					"LeadTarget",
+					"Lead the target",
+					10,
+					whenSpec(function(spec)
+						return spec.SpawnDirection == "Target"
+					end),
+					Copy.Hints.LeadTarget
 				)
 			)
 		end
@@ -734,14 +812,34 @@ local function HitboxTab(
 				if not spec then
 					return ""
 				end
-				return if spec.SpreadPattern == "Single"
+				local line = if spec.SpreadPattern == "Single"
 					then "one shot"
 					else `{OPTION_TEXT[spec.SpreadPattern] or spec.SpreadPattern}  ·  {spec.Count} shots`
+				return if spec.ConvergeDistance > 0 then `{line}  ·  converging` else line
 			end),
 			LayoutOrder = 12,
 			Visible = customProjectile,
 			Build = function()
+				local function pattern(...: string): Fusion.Computed<boolean>
+					local set = { ... }
+					return whenSpec(function(spec)
+						return table.find(set, spec.SpreadPattern) ~= nil
+					end)
+				end
 				return {
+					Fields.ActionChips(scope, context, {
+						Label = "Start from",
+						Options = RECIPE_OPTIONS,
+						Describe = RECIPE_TEXT,
+						Hint = Copy.Hints.Recipes,
+						LayoutOrder = 0,
+						Apply = function(move, id)
+							local recipe = ProjectileTypes.RecipeById(id)
+							if recipe and move.Projectile then
+								ProjectileTypes.ApplyRecipe(move.Projectile, recipe)
+							end
+						end,
+					}),
 					specChips(
 						"SpreadPattern",
 						"Pattern",
@@ -768,9 +866,7 @@ local function HitboxTab(
 						{ 5, 30 },
 						0,
 						3,
-						whenSpec(function(spec)
-							return spec.SpreadPattern == "Fan" or spec.SpreadPattern == "Radial"
-						end),
+						pattern("Fan", "Radial"),
 						Copy.Hints.SpreadAngle
 					),
 					specNumber(
@@ -780,10 +876,96 @@ local function HitboxTab(
 						{ 0.25, 1 },
 						2,
 						4,
-						whenSpec(function(spec)
-							return spec.SpreadPattern == "Horizontal" or spec.SpreadPattern == "Vertical"
-						end)
+						pattern("Horizontal", "Vertical", "Grid")
 					),
+					specNumber("Columns", "Columns", "per row", { 1 }, 0, 5, pattern("Grid"), Copy.Hints.Columns),
+					specNumber(
+						"FormationRadius",
+						"Formation radius",
+						"studs",
+						{ 0.25, 1 },
+						2,
+						6,
+						pattern("Circle", "Fan", "Radial"),
+						Copy.Hints.FormationRadius
+					),
+					specNumber(
+						"ConvergeDistance",
+						"Converge at",
+						"studs ahead (0 = off)",
+						{ 1, 10 },
+						0,
+						7,
+						whenSpec(function(spec)
+							return spec.SpreadPattern ~= "Single"
+						end),
+						Copy.Hints.ConvergeDistance
+					),
+				}
+			end,
+		}),
+		Fields.Section(scope, {
+			Title = "WAVES",
+			Summary = summary(function(move)
+				local spec = move.Projectile
+				if not spec then
+					return ""
+				end
+				local budget = ProjectileTypes.Budget(spec)
+				if budget.Waves <= 1 and spec.ShotIntervalSeconds <= 0 then
+					return "one wave"
+				end
+				return string.format(
+					"%d wave%s  ·  %g shots  ·  over %.2fs",
+					budget.Waves,
+					if budget.Waves == 1 then "" else "s",
+					budget.ShotsPerWave * budget.Waves,
+					budget.CastSeconds
+				)
+			end),
+			LayoutOrder = 13,
+			StartClosed = true,
+			Visible = customProjectile,
+			Build = function()
+				local waves = whenSpec(function(spec)
+					return spec.WaveCount > 1
+				end)
+				return {
+					specNumber("WaveCount", "Waves", nil, { 1 }, 0, 1, nil, Copy.Hints.WaveCount),
+					specNumber(
+						"WaveIntervalSeconds",
+						"Between waves",
+						"seconds",
+						{ 0.02, 0.1 },
+						2,
+						2,
+						waves,
+						Copy.Hints.WaveInterval
+					),
+					specNumber(
+						"ShotIntervalSeconds",
+						"Between shots",
+						"seconds",
+						{ 0.01, 0.05 },
+						2,
+						3,
+						whenSpec(function(spec)
+							return ProjectileTypes.ShotCount(spec) > 1
+						end),
+						Copy.Hints.ShotInterval
+					),
+					specNumber(
+						"WaveRollDegrees",
+						"Turn per wave",
+						"degrees",
+						{ 5, 30 },
+						0,
+						4,
+						waves,
+						Copy.Hints.WaveRoll
+					),
+					specChips("WaveAim", "Aim", ProjectileTypes.WaveAims, 5, waves, Copy.Hints.WaveAim),
+					specToggle("AlternateSides", "Alternate sides", 6, waves, Copy.Hints.AlternateSides),
 				}
 			end,
 		}),
@@ -800,15 +982,70 @@ local function HitboxTab(
 					)
 					else ""
 			end),
-			LayoutOrder = 13,
+			LayoutOrder = 14,
 			Visible = customProjectile,
 			Build = function()
 				return {
 					specNumber("Speed", "Speed", "studs/s", { 5, 25 }, 0, 1),
 					specNumber("LifetimeSeconds", "Lifetime", "seconds", { 0.1, 0.5 }, 2, 2),
 					specNumber("MaxRange", "Max range", "studs", { 5, 50 }, 0, 3),
-					specNumber("Gravity", "Gravity", "studs/s² down", { 1, 10 }, 1, 4, nil, Copy.Hints.Gravity),
-					specNumber("Acceleration", "Acceleration", "studs/s² along its heading", { 1, 10 }, 1, 5),
+					specChips("RangeMode", "Range measured", ProjectileTypes.RangeModes, 4, nil, Copy.Hints.RangeMode),
+					specNumber("Gravity", "Gravity", "studs/s² down", { 1, 10 }, 1, 5, nil, Copy.Hints.Gravity),
+					specNumber("Acceleration", "Acceleration", "studs/s² along its heading", { 1, 10 }, 1, 6),
+					specNumber("MinSpeed", "Min speed", "studs/s", { 5, 25 }, 0, 7, nil, Copy.Hints.SpeedBounds),
+					specNumber("MaxSpeed", "Max speed", "studs/s", { 5, 25 }, 0, 8),
+				}
+			end,
+		}),
+		Fields.Section(scope, {
+			Title = "PATH",
+			Summary = summary(function(move)
+				local spec = move.Projectile
+				if not spec then
+					return ""
+				end
+				local parts = {}
+				if spec.WeaveDegrees > 0 then
+					table.insert(parts, string.format("weaves %g°", spec.WeaveDegrees))
+				end
+				if spec.ReturnAfterSeconds > 0 then
+					table.insert(parts, string.format("returns after %gs", spec.ReturnAfterSeconds))
+				end
+				return if #parts > 0 then table.concat(parts, "  ·  ") else "straight"
+			end),
+			LayoutOrder = 15,
+			StartClosed = true,
+			Visible = customProjectile,
+			Build = function()
+				local weaves = whenSpec(function(spec)
+					return spec.WeaveDegrees > 0
+				end)
+				return {
+					specNumber("WeaveDegrees", "Weave", "degrees either side", { 5, 15 }, 0, 1, nil, Copy.Hints.Weave),
+					specNumber("WeaveFrequency", "Weave frequency", "per second", { 0.1, 0.5 }, 2, 2, weaves),
+					specChips("WeavePlane", "Weave", ProjectileTypes.WeavePlanes, 3, weaves, nil, WEAVE_PLANE_TEXT),
+					specToggle("WeaveMirrored", "Mirror every second shot", 4, weaves, Copy.Hints.WeaveMirrored),
+					specNumber(
+						"ReturnAfterSeconds",
+						"Return after",
+						"seconds (0 = never)",
+						{ 0.05, 0.25 },
+						2,
+						5,
+						nil,
+						Copy.Hints.ReturnAfter
+					),
+					specNumber(
+						"ReturnTurnRate",
+						"Return turn",
+						"degrees/s",
+						{ 30, 180 },
+						0,
+						6,
+						whenSpec(function(spec)
+							return spec.ReturnAfterSeconds > 0
+						end)
+					),
 				}
 			end,
 		}),
@@ -821,16 +1058,17 @@ local function HitboxTab(
 				end
 				return if spec.Homing then string.format("%g°/s turn", spec.HomingStrength) else "Off"
 			end),
-			LayoutOrder = 14,
+			LayoutOrder = 16,
 			StartClosed = true,
 			Visible = customProjectile,
 			Build = function()
 				local homes = whenSpec(function(spec)
 					return spec.Homing
 				end)
-				-- Range, cone and selection also decide who "the target" is for a volley fired At the target.
+				-- Range, cone and selection also decide who "the target" is for a volley fired At the target,
+				-- and for one spawned at it.
 				local targets = whenSpec(function(spec)
-					return spec.Homing or spec.SpawnDirection == "Target"
+					return spec.Homing or spec.SpawnDirection == "Target" or spec.SpawnFrom == "Target"
 				end)
 				return {
 					specToggle("Homing", "Homing", 1, nil, Copy.Hints.Homing),
@@ -845,6 +1083,26 @@ local function HitboxTab(
 						targets,
 						Copy.Hints.TargetSelection
 					),
+					specNumber(
+						"HomingDelaySeconds",
+						"Homing delay",
+						"seconds",
+						{ 0.05, 0.25 },
+						2,
+						6,
+						homes,
+						Copy.Hints.HomingDelay
+					),
+					specNumber(
+						"HomingDurationSeconds",
+						"Homing duration",
+						"seconds (0 = whole flight)",
+						{ 0.05, 0.25 },
+						2,
+						7,
+						homes,
+						Copy.Hints.HomingDuration
+					),
 				}
 			end,
 		}),
@@ -856,12 +1114,21 @@ local function HitboxTab(
 					return ""
 				end
 				local line = `walls: {OPTION_TEXT[spec.CollisionBehavior] or spec.CollisionBehavior}`
-				return if spec.Piercing then `{line}  ·  pierces {spec.MaxPierces}` else line
+				if spec.Piercing then
+					line = `{line}  ·  pierces {spec.MaxPierces}`
+				end
+				if spec.ProximityRadius > 0 then
+					line = `{line}  ·  fuse {spec.ProximityRadius}`
+				end
+				return line
 			end),
-			LayoutOrder = 15,
+			LayoutOrder = 17,
 			StartClosed = true,
 			Visible = customProjectile,
 			Build = function()
+				local falls = whenSpec(function(spec)
+					return spec.FalloffMinScale < 1
+				end)
 				return {
 					specChips("CollisionBehavior", "On walls", ProjectileTypes.CollisionBehaviors, 1),
 					specNumber(
@@ -887,7 +1154,105 @@ local function HitboxTab(
 							return spec.Piercing
 						end)
 					),
-					specToggle("CanHitOwner", "Can hit its thrower", 5, nil, Copy.Hints.CanHitOwner),
+					specNumber(
+						"RehitSeconds",
+						"Re-hit after",
+						"seconds (0 = once)",
+						{ 0.05, 0.25 },
+						2,
+						5,
+						whenSpec(function(spec)
+							return spec.Piercing
+						end),
+						Copy.Hints.Rehit
+					),
+					specToggle("CanHitOwner", "Can hit its thrower", 6, nil, Copy.Hints.CanHitOwner),
+					specNumber(
+						"ProximityRadius",
+						"Proximity fuse",
+						"studs (0 = off)",
+						{ 0.5, 2 },
+						1,
+						7,
+						nil,
+						Copy.Hints.Proximity
+					),
+					specNumber(
+						"FalloffMinScale",
+						"Damage at max range",
+						"× (1 = no falloff)",
+						{ 0.05, 0.25 },
+						2,
+						8,
+						nil,
+						Copy.Hints.Falloff
+					),
+					specNumber("FalloffStartStuds", "Falloff starts at", "studs", { 5, 25 }, 0, 9, falls),
+				}
+			end,
+		}),
+		Fields.Section(scope, {
+			Title = "ON END",
+			Summary = summary(function(move)
+				local spec = move.Projectile
+				if not spec then
+					return ""
+				end
+				local parts = {}
+				if spec.ExplodeOn ~= "Never" then
+					table.insert(parts, string.format("bursts %g studs on %s", spec.ExplosionRadius, spec.ExplodeOn))
+				end
+				if spec.SplitOn ~= "Never" then
+					table.insert(parts, string.format("splits into %d on %s", spec.SplitCount, spec.SplitOn))
+				end
+				return if #parts > 0 then table.concat(parts, "  ·  ") else "nothing"
+			end),
+			LayoutOrder = 18,
+			StartClosed = true,
+			Visible = customProjectile,
+			Build = function()
+				local bursts = whenSpec(function(spec)
+					return spec.ExplodeOn ~= "Never"
+				end)
+				local splits = whenSpec(function(spec)
+					return spec.SplitOn ~= "Never"
+				end)
+				return {
+					specChips("ExplodeOn", "Burst", ProjectileTypes.EndTriggers, 1, nil, Copy.Hints.ExplodeOn),
+					specNumber(
+						"ExplosionRadius",
+						"Burst radius",
+						"studs",
+						{ 0.5, 2 },
+						1,
+						2,
+						bursts,
+						Copy.Hints.ExplosionRadius
+					),
+					specNumber("ExplosionDamageScale", "Burst damage", "× the shot's", { 0.05, 0.25 }, 2, 3, bursts),
+					specChips(
+						"ExplosionScope",
+						"Which shots burst",
+						ProjectileTypes.ExplosionScopes,
+						4,
+						both(bursts, splits),
+						Copy.Hints.ExplosionScope
+					),
+					specChips("SplitOn", "Split", ProjectileTypes.EndTriggers, 5, nil, Copy.Hints.SplitOn),
+					specNumber("SplitCount", "Split into", "shots", { 1 }, 0, 6, splits),
+					specChips("SplitPattern", "Split pattern", ProjectileTypes.SplitPatterns, 7, splits),
+					specNumber("SplitAngle", "Split angle", "degrees", { 5, 30 }, 0, 8, splits),
+					specNumber("SplitSpeedScale", "Split speed", "× the shot's", { 0.05, 0.25 }, 2, 9, splits),
+					specNumber(
+						"SplitGenerations",
+						"Generations",
+						nil,
+						{ 1 },
+						0,
+						10,
+						splits,
+						Copy.Hints.SplitGenerations
+					),
 				}
 			end,
 		}),
@@ -903,7 +1268,7 @@ local function HitboxTab(
 					then behavior
 					else `{behavior}  ·  {OPTION_TEXT[spec.ParryResponse] or spec.ParryResponse}`
 			end),
-			LayoutOrder = 16,
+			LayoutOrder = 19,
 			StartClosed = true,
 			Visible = customProjectile,
 			Build = function()
@@ -944,7 +1309,17 @@ local function HitboxTab(
 		}),
 		Fields.Section(scope, {
 			Title = "SPAWN",
-			Summary = summary(placementSummary),
+			Summary = summary(function(move)
+				local line = placementSummary(move)
+				local spec = move.Projectile
+				if spec and spec.SpawnHeight ~= 0 then
+					local from = if spec.HeightFrom == "Ground" then " off the ground" else ""
+					line = `{line}  ·  +{string.format("%g", spec.SpawnHeight)} up{from}`
+				elseif spec and spec.HeightFrom == "Ground" then
+					line = `{line}  ·  on the ground`
+				end
+				return if spec and spec.SpawnFrom == "Target" then `at target  ·  {line}` else line
+			end),
 			-- Second, under BODY: where it comes from, as PLACEMENT is a melee move's second question.
 			LayoutOrder = 11,
 			Visible = both(isCustom, isProjectile),

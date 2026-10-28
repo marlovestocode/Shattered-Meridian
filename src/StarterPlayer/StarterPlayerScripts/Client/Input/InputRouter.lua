@@ -100,6 +100,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local Analog = require(script.Parent.Analog)
 local Chord = require(script.Parent.Chord)
 local KeybindManager = require(script.Parent.KeybindManager)
+local DebugKeys = require(ReplicatedStorage.Shared.Input.DebugKeys)
 
 local logger = Logger.scope("InputRouter")
 
@@ -132,6 +133,25 @@ local LAYER_RANK: { [Layer]: number } = {
 -- every Types.KeybindAction that exists -- this router costs nothing for the (large majority of)
 -- actions nothing has bound yet.
 local bindings: { [Types.KeybindAction]: { Binding } } = {}
+
+-- Raw developer keys (Shared/Input/DebugKeys.lua), by the KeyCode DebugKeys names. System semantics: never modal-gated, never
+-- dropped on gameProcessed (the caller checks it, off the argument Began receives), never a chord.
+local debugBindings: { { Key: Enum.KeyCode, Began: (gameProcessed: boolean, input: InputObject) -> () } } = {}
+
+-- Binds one of Shared/Input/DebugKeys's raw keys by its name there ("FpsCounter", "ParkourDebug", "Storybook"). The key is the
+-- table's, so a tool never names an Enum.KeyCode itself and DebugKeys.Clashes() covers every dev key that is actually bound.
+function InputRouter.BindDebugKey(name: string, began: (gameProcessed: boolean, input: InputObject) -> ()): () -> ()
+	local key = (DebugKeys :: any)[name]
+	assert(typeof(key) == "EnumItem", `InputRouter.BindDebugKey("{name}"): not a key in Shared/Input/DebugKeys`)
+	local entry = { Key = key :: Enum.KeyCode, Began = began }
+	table.insert(debugBindings, entry)
+	return function()
+		local at = table.find(debugBindings, entry)
+		if at ~= nil then
+			table.remove(debugBindings, at)
+		end
+	end
+end
 
 -- The real modal-open predicate -- guarded for a nil LocalPlayer exactly the way Shell/Chrome.lua's
 -- ObserveModalGate is, and for the identical reason (this module is require-loaded on the server by
@@ -240,6 +260,12 @@ end
 -- table cast to InputObject instead of a real one.
 function InputRouter.HandleInputBegan(input: InputObject, gameProcessed: boolean): ()
 	local modalOpen = isModalOpen()
+
+	for _, entry in table.clone(debugBindings) do
+		if input.KeyCode == entry.Key then
+			entry.Began(gameProcessed, input)
+		end
+	end
 
 	-- THE CHORD LAYER GETS FIRST REFUSAL, AND ITS ANSWER IS EXCLUSIVE. Client/Input/Chord.lua's
 	-- header states the two rules this branch exists to enforce, and both are about what must NOT

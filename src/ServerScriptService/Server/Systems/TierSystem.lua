@@ -56,10 +56,11 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("TierSystem")
 
@@ -237,6 +238,12 @@ local function onProfileLoaded(player: Player): ()
 end
 
 function TierSystem.Init(): ()
+	-- The tier held -- no `PreviousTier`, so a replay never shows a promotion twice (PlayerStateSystem's header).
+	PlayerStateSystem.Register("Tier", function(player: Player)
+		if tierUpdatedRemote and PlayerDataSystem.IsLoaded(player) then
+			tierUpdatedRemote:FireClient(player, buildPayload(TierSystem.GetTier(player), nil))
+		end
+	end)
 	local ladderOk, ladderProblem = TierConstants.Validate()
 	if not ladderOk then
 		-- Never fatal: a mis-edited ladder should degrade to a wrong-feeling progression curve on a
@@ -248,7 +255,8 @@ function TierSystem.Init(): ()
 		})
 	end
 
-	tierUpdatedRemote = NetworkBridge.CreateRemoteEvent(TierConstants.RemoteNames.TierUpdated)
+	local endpoint = Endpoint.Scope("TierSystem", logger)
+	tierUpdatedRemote = endpoint.Push(TierConstants.RemoteNames.TierUpdated)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 

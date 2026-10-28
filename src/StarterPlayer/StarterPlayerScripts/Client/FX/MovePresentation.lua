@@ -14,7 +14,7 @@
 	layer and states the rule (Pick, SoundSource); the layers beneath it stay with the modules that already
 	own them: CombatAudio knows the weapon's SFX folder and the shared stingers, ImpactSparks its presets,
 	CombatFeedbackClient which shake and freeze an outcome gets, ProjectileFX the default shot look,
-	AttackTrail the swing trail. Each of those takes the resolved cue and applies it on top of its own
+	SwingTrail the swing trail. Each of those takes the resolved cue and applies it on top of its own
 	answer, so there is still exactly ONE path per effect -- a move's cue changes what that path plays,
 	it never runs a second copy of it.
 

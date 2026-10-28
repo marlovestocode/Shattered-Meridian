@@ -38,6 +38,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local TransformLayer = require(script.Parent.TransformLayer)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("HitFlinchPose")
 
@@ -49,16 +50,9 @@ local STUN_ATTRIBUTE = AttributeConstants.HitstunUntil
 local RENDER_STEP_NAME = "HitFlinchPose"
 -- Above Character (the animation step has written this frame's Transforms), and BELOW GuardStrainPose's +2
 -- so a guard that strains in the same frame a hit lands composes on top of the flinch, not under it.
-local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 1
+local RENDER_PRIORITY = FrameOrder.Priority("HitFlinchPose")
 
 -- R6 joint name -> the Part that holds it (the game is R6-locked).
-local JOINTS: { { Name: string, Holder: string } } = {
-	{ Name = "RootJoint", Holder = "HumanoidRootPart" },
-	{ Name = "Neck", Holder = "Torso" },
-	{ Name = "Right Shoulder", Holder = "Torso" },
-	{ Name = "Left Shoulder", Holder = "Torso" },
-}
-
 type Flinch = {
 	Humanoid: Humanoid,
 	-- Seconds into the current flinch's envelope.
@@ -145,22 +139,6 @@ end
 
 -- Joints ---------------------------------------------------------------------------------------------
 
-local function resolveJoints(humanoid: Humanoid): { Motor6D }?
-	local model = humanoid.Parent
-	if model == nil then
-		return nil
-	end
-	local joints: { Motor6D } = {}
-	for _, spec in JOINTS do
-		local holder = model:FindFirstChild(spec.Holder)
-		local motor = if holder then holder:FindFirstChild(spec.Name) else nil
-		if motor and motor:IsA("Motor6D") then
-			table.insert(joints, motor)
-		end
-	end
-	return if #joints > 0 then joints else nil
-end
-
 -- Takes this layer off every joint -- see TransformLayer.Restore.
 local function restore(flinch: Flinch): ()
 	local joints = flinch.Joints
@@ -178,7 +156,7 @@ end
 local function applyPose(flinch: Flinch, weight: number): ()
 	local joints = flinch.Joints
 	if not joints then
-		joints = resolveJoints(flinch.Humanoid)
+		joints = TransformLayer.ResolveBodyJoints(flinch.Humanoid)
 		flinch.Joints = joints
 		if not joints then
 			return

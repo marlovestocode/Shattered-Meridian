@@ -14,10 +14,10 @@
 	throttles the rapid multi-target case) whose amplitude eases to zero over its duration, sampled
 	through math.noise per axis so the motion is smooth wander rather than random jitter. Applied by
 	POST-MULTIPLYING a small CFrame.Angles onto Workspace.CurrentCamera each frame at
-	RenderPriority.Camera + 2 -- deliberately AFTER the default camera scripts (Camera) AND
-	ShiftLockCamera's Camera + 1 character-yaw write, so the shake layers on the frame's FINAL camera
+	FrameOrder's CameraShake slot -- deliberately AFTER the default camera scripts AND
+	CombatCamera's character-yaw write, so the shake layers on the frame's FINAL camera
 	pose instead of being overwritten by, or fighting, either. Never touches Humanoid.CameraOffset --
-	that property is ShiftLockCamera's alone (see its header); this only ever composes onto the camera
+	that property is CombatCamera's alone (see its header); this only ever composes onto the camera
 	CFrame.
 
 	EACH FRAME'S SHAKE IS TAKEN BACK OFF BEFORE THE NEXT CAMERA UPDATE (2026-09-29). The default camera
@@ -31,7 +31,7 @@
 
 	Does not own: deciding WHEN to shake or how hard (CombatClient picks the preset per resolution),
 	the FOV punch (SwingEffect) or colour dip (StunEffect), or any camera framing/lock behavior
-	(ShiftLockCamera). Purely additive, purely local -- nothing here crosses the network.
+	(CombatCamera). Purely additive, purely local -- nothing here crosses the network.
 ]]
 
 local RunService = game:GetService("RunService")
@@ -39,6 +39,9 @@ local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local SettingsStore = require(script.Parent.Parent.Settings.SettingsStore)
+local Types = require(ReplicatedStorage.Shared.Types)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("CameraShake")
 
@@ -146,7 +149,8 @@ end
 
 -- Removes last frame's shake before the camera scripts run, so it never becomes the starting point of the
 -- next frame's look. Only on the camera it was applied to: a camera swapped out in between never carried
--- it. Before LockOnController (Camera - 1), so the lock eases from the player's real aim too.
+-- it. After CameraRotationComposer's undo (the rotation went on after the shake, so it comes off first) and before
+-- CombatCamera's aim step, so the lock eases from the player's real aim too.
 local function undoLastShake(): ()
 	local rotation = appliedRotation
 	if rotation == nil then
@@ -161,7 +165,7 @@ local function undoLastShake(): ()
 end
 
 -- Binds the render-step compositor. Called once from Main.client.lua's boot sequence, after
--- ShiftLockCamera.Start so the ordering note in the header holds (both bind at their own priority
+-- CombatCamera.Start so the ordering note in the header holds (both bind at their own priority
 -- regardless of call order, but keeping the boot order aligned with the priority order avoids
 -- surprise). Idempotent.
 function CameraShake.Start(): ()
@@ -169,8 +173,11 @@ function CameraShake.Start(): ()
 		return
 	end
 	started = true
-	RunService:BindToRenderStep(UNDO_STEP_NAME, Enum.RenderPriority.Camera.Value - 2, undoLastShake)
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value + 2, onRenderStep)
+	SettingsStore.Observe("Comfort", function(comfort: Types.ComfortSettings)
+		CameraShake.SetEnabled(comfort.CameraShake)
+	end)
+	RunService:BindToRenderStep(UNDO_STEP_NAME, FrameOrder.Priority("CameraShakeUndo"), undoLastShake)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("CameraShake"), onRenderStep)
 	logger:info("CameraShake started")
 end
 

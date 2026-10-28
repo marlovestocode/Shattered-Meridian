@@ -101,6 +101,7 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Trove = require(ReplicatedStorage.Shared.Trove)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local HotbarBindings = require(script.Parent.HotbarBindings)
 local LocalCombatState = require(script.Parent.LocalCombatState)
@@ -395,6 +396,16 @@ local function playSwing(payload: AttackStartedPayload, startOffset: number?): (
 	-- whole desync AttackConstants.Windows.SyncToClipLength exists to remove.
 	local speed = speedOf(payload)
 
+	-- A NEW SWING IS A NEW TRACK. AnimationManager keeps a same-source, same-clip claim playing instead of
+	-- restarting it (a re-push of a sticky claim), and two stages can share one clip: Basic:1 and Basic:3 are
+	-- the same right cross. So a fresh string's B1 thrown while the last string's B3 was still on the layer (a
+	-- hit-confirm cancel, a quick restart) never punched -- it carried on with B3's recovery -- while everything
+	-- scheduled off this swing (the trail, the lunge, the whoosh) ran on the new swing's clock, after the arm
+	-- had already come back. Retire the old track first so this swing's clip starts from its own frame 0.
+	if manager:GetActiveClip(ATTACK_LAYER) == animationId then
+		manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, nil)
+	end
+
 	manager:SetClaim(ATTACK_LAYER, SWING_SOURCE, {
 		Clip = animationId,
 		Looped = false,
@@ -643,9 +654,8 @@ local function bodyAllowsSwing(): boolean
 	if defenceState ~= nil and defenceState ~= "Neutral" then
 		return false
 	end
-	return humanoid:GetAttribute(AttributeConstants.Mounted) ~= true
-		and humanoid:GetAttribute(AttributeConstants.Grabbed) ~= true
-		and humanoid:GetAttribute(AttributeConstants.Grabbing) ~= true
+	-- BodyRestraint's "LocalSwing" row: mounted, grabbed or holding a grab. The server's "Swing" row still decides.
+	return not BodyRestraint.Restrained(humanoid, "LocalSwing")
 end
 
 local function cutUnconfirmedSwing(): ()
@@ -928,7 +938,17 @@ local function onAttackStarted(raw: unknown): ()
 	else
 		-- Unpredicted, or predicted wrong (the server resolved a different stage): play what the server
 		-- actually threw. The claim supersedes a wrong prediction's clip on the same layer.
-		startSwing(payload, now)
+		--
+		-- BACKDATED by how far in the server already was (AttackStartedPayload.ElapsedSeconds): it started this
+		-- swing up to MaxLeadSeconds before the press arrived, so starting everything now runs the clip, the
+		-- turn and the step that late. The same lead the clip's start offset carries. Off the wire, so
+		-- validated and capped here.
+		local elapsed = payload.ElapsedSeconds
+		if typeof(elapsed) ~= "number" or elapsed ~= elapsed or elapsed < 0 or elapsed >= swingSecondsOf(payload) then
+			elapsed = 0
+		end
+		elapsed = math.min(elapsed :: number, AttackConstants.Latency.MaxLeadSeconds)
+		startSwing(payload, now - elapsed, if elapsed > 0 then elapsed else nil)
 	end
 
 	if payload.Kind == "Hotbar" and typeof(payload.Slot) == "number" then
@@ -1214,7 +1234,7 @@ end
 -- Subscribes to every early end of a swing this client started -- a feint, a server-side interrupt,
 -- or a prediction the server never confirmed. For presentation that was scheduled off
 -- OnAttackStarted and must not play for a swing that no longer exists (SwingLunge's step,
--- AttackTrail's trail). Returns an unsubscribe function.
+-- SwingTrail's trail). Returns an unsubscribe function.
 function AttackInputClient.OnSwingCancelled(listener: (SwingCancelReason) -> ()): () -> ()
 	return swingCancelledListeners:Connect(listener)
 end
@@ -1249,6 +1269,27 @@ end
 -- to the same remote and having to re-validate the payload.
 function AttackInputClient.OnAttackStarted(listener: (AttackStartedPayload) -> ()): () -> ()
 	return attackStartedListeners:Connect(listener)
+end
+
+-- Where this client's own swing clip is: its playhead in CLIP seconds and the clip it is playing, or nil
+-- for both when no swing clip holds the layer. For presentation that must sit on the animation itself
+-- rather than on a wall-clock schedule (Client/FX/SwingTrail lights on the clip's own strike frames, so a
+-- hit-stop freeze, a buffered start offset or a re-timed clip cannot put the trail beside the punch).
+function AttackInputClient.GetSwingPlayback(): (number?, string?)
+	local clip = manager:GetActiveClip(ATTACK_LAYER)
+	if clip == nil then
+		return nil, nil
+	end
+	local position = manager:GetPlayback(ATTACK_LAYER)
+	return position, clip
+end
+
+-- When the swing now playing is deemed to have STARTED: the press for a predicted swing, the instant a buffered
+-- press's gate opened, or the confirmation backdated by the server's ElapsedSeconds. Set before any
+-- OnAttackStarted listener fires, so a listener schedules off this rather than off os.clock() at dispatch --
+-- which is a round trip or a frame late for an unpredicted or buffered swing.
+function AttackInputClient.GetSwingStartedAt(): number
+	return playingStartedAt
 end
 
 -- The weapon the server last said this player is holding. Presentation only.

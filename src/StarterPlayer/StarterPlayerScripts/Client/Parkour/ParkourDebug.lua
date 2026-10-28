@@ -70,7 +70,6 @@
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
-local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -92,6 +91,7 @@ local Panel = require(script.Parent.Parent.UI.Components.Panel)
 local Label = require(script.Parent.Parent.UI.Components.Label)
 local Section = require(script.Parent.Parent.UI.Components.Section)
 local TrackedLabel = require(script.Parent.Parent.UI.Components.TrackedLabel)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 
 local Children = Fusion.Children
 
@@ -953,11 +953,8 @@ function ParkourDebug.Start(): ()
 	-- path -- see its own Start header). Gating the CONNECTION on a flag that is still false at boot
 	-- meant an authorized admin could never get the overlay in a live game no matter what happened
 	-- afterwards.
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
+	InputRouter.BindDebugKey("ParkourDebug", function(gameProcessed: boolean)
 		if gameProcessed then
-			return
-		end
-		if input.KeyCode ~= DEBUG.ToggleKeyCode then
 			return
 		end
 		if not toggleAvailable() then

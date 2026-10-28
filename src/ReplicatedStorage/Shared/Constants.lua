@@ -112,7 +112,7 @@ Constants.Network = {
 	-- requiring this before the server's own remote-creating System has necessarily finished booting
 	-- on a slow server start), Server/Systems/CombatSystem.lua's onCharacterAdded loading a fresh
 	-- Humanoid/HumanoidRootPart, and four client CharacterAdded handlers waiting on that same pair of
-	-- parts (Client/Camera/FlightCamera.lua, Client/Camera/ShiftLockCamera.lua, Client/DevTools/DevMenu/
+	-- parts (Client/Camera/FlightCamera.lua, Client/Camera/CombatCamera.lua, Client/DevTools/DevMenu/
 	-- FlightController.lua, Client/DevTools/DevMenu/DevMenuClient.lua). All seven were tuned to agree on 10s by
 	-- coincidence, not by reference to a shared source -- a future "give slow connections more slack"
 	-- pass would otherwise have had to hunt down and edit every call site instead of one number. Not
@@ -200,10 +200,8 @@ Constants.CharacterSheet = {
 		-- Server -> owning client, on profile load and on any later change. Payload:
 		-- Types.CharacterSheetPayload.
 		SheetUpdated = "Character_SheetUpdated",
-		-- Client -> server, no payload, returns Types.CharacterSheetPayload (or nil if the caller's
-		-- profile genuinely isn't loaded yet -- never a fabricated blank sheet, which the panel would
-		-- have no way to tell apart from a real one).
-		GetSheet = "Character_GetSheet",
+		-- (Character_GetSheet, the pull for a client that missed the push, was removed 2026-10-27: ClientState caches the
+		-- push and PlayerState_Replay re-sends it.)
 	},
 	-- Same per-player query budget Constants.Rivalry/ArtConstants already use for their own read-only
 	-- request remotes, and for the identical reason: a menu open costs one call, so anything beyond a

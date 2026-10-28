@@ -3,7 +3,7 @@
 	ShiftLockCrosshair.lua
 
 	Owns: the center-screen aim marker shown while the custom shift-lock camera mode is engaged
-	(Client/Camera/ShiftLockCamera.lua) -- the game-styled replacement for the engine's stock
+	(Client/Camera/CombatCamera.lua) -- the game-styled replacement for the engine's stock
 	mouse-locked cursor texture, which docs/ui-ux-philosophy.md's "avoid generic Roblox UI styles"
 	rule reads as off-brand. Deliberately minimal and modern: four 1px hairline cardinal ticks in
 	the same BorderAccent metal-blue as LockOnReticle.lua's corner ticks (the two reticles read as
@@ -16,8 +16,8 @@
 	player's own focused intent). Pure Frame geometry, no image asset -- same no-upload-pipeline
 	reasoning as VitalIcon.lua's procedural glyph fallback.
 
-	Does not own: deciding when shift lock is engaged (ShiftLockCamera.lua), hiding the engine
-	cursor (also ShiftLockCamera.lua -- UserInputService is input policy, not presentation), or
+	Does not own: deciding when shift lock is engaged (CombatCamera.lua), hiding the engine
+	cursor (also CombatCamera.lua -- UserInputService is input policy, not presentation), or
 	lock-on targeting (LockOnReticle.lua). This component only renders whatever Engaged says --
 	the same "already-computed value in, presentation out" boundary every component here uses.
 ]]

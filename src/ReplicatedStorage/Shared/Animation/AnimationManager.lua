@@ -5,8 +5,13 @@
 	Owns: EVERY AnimationTrack a single rig plays -- loading them, deciding which of the competing
 	requests actually gets the body, starting/crossfading/stopping them, noticing when one falls off
 	its own track, and tearing every last one of them down when that rig dies or goes away. One
-	instance per rig (the local player's character, a bot, an NPC); nothing else in the codebase
-	touches an AnimationTrack directly.
+	instance per rig (the local player's character, a bot, an NPC).
+
+	THE EXCEPTIONS, so this header stays true (cohesion-report's load_animation_bypass counts them): Client/FX/
+	CombatAnimator.lua (locomotion, armed idle; not yet migrated -- the largest piece, see docs/architecture/
+	2026-10-27-w11-migration-list.md), Client/Intro/IntroClient.lua (two one-off cutscene clips) and Client/
+	DevTools/MoveEditor/ClipScrubber.lua (a dev tool that scrubs a clip by hand) load tracks themselves.
+	Emote and flight clips are claims on Client/FX/LocalAnimator.lua's instance.
 
 	WHY THIS EXISTS. Animation used to be four independent modules -- Client/FX/CombatAnimator.lua
 	(locomotion), Client/FX/FlightAnimator.lua, Client/FX/EmoteAnimator.lua and Client/Parkour/
@@ -600,6 +605,11 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 			local position = math.min(startOffset * speed, track.Length)
 			track.TimePosition = position
 			entry.LastPosition = position
+		elseif not looped then
+			-- From frame 0 even when this is the same cached track a moment ago's entry was playing: a one-shot
+			-- re-claimed right after its own retire (a new swing on the clip the last swing used) is a new
+			-- play, never a resume of the fading one.
+			track.TimePosition = 0
 		end
 	end)
 	if not played then
@@ -621,6 +631,11 @@ local function start(self: AnimationManagerInstance, claim: Claim): ()
 	-- retire() before any induced Stop, so in practice this never even fires for one.
 	entry.Stopped = track.Stopped:Connect(function()
 		if entry.Retired or self.active[claim.Layer] ~= entry then
+			return
+		end
+		-- Playing again: this is the stop of the PREVIOUS entry on the same cached track (retired and
+		-- replayed in one frame), delivered after this entry connected. Not this entry's end.
+		if track.IsPlaying then
 			return
 		end
 		if entry.Looped then

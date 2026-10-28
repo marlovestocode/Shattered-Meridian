@@ -24,8 +24,8 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 
 local ServerHopSystem = {}
 
@@ -43,7 +43,7 @@ local TELEPORT_FAILED_MESSAGE = "Failed to join a server. Try again."
 -- call discipline, not just its payload; a second TeleportAsync for a player already mid-teleport
 -- would be redundant at best. Cleared on PlayerRemoving below, same convention as BugReportSystem.
 -- lua's own per-player maps.
-local pendingByPlayer: { [Player]: boolean } = {}
+local pendingByPlayer: { [Player]: boolean } = PlayerScoped.New("ServerHopSystem.pendingByPlayer")
 
 -- Not Shared/RemoteHandler.WrapInvoke -- this handler returns (boolean, string?), and WrapInvoke's
 -- generic only carries a single Result, not a Result... pack. Hand-wrapped instead, in the same
@@ -82,14 +82,6 @@ end
 function ServerHopSystem.Init(): ()
 	local requestTeleportRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.RequestTeleport)
 	requestTeleportRemote.OnServerInvoke = handleRequestTeleport
-
-	PlayerLifecycle.BindAllPlayers({
-		Scope = "ServerHopSystem",
-		OnPlayerRemoving = function(player: Player)
-			pendingByPlayer[player] = nil
-			rateLimiter:Clear(player)
-		end,
-	})
 
 	logger:info("ServerHopSystem.Init() complete")
 end

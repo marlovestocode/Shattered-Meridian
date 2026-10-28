@@ -5,8 +5,8 @@
 	Owns: authorization + rate-limiting, every Constants.KitEditor.RemoteNames RemoteFunction, and
 	DataStore persistence for BOTH Race Trait and Bloodline content -- the "System" half of the
 	Manager/System pairing whose "Manager" halves are Server/Managers/RaceManager.lua and
-	Server/Managers/BloodlineManager.lua. Mirrors MoveEditorSystem.lua's own shape closely: AdminGate.
-	Check (auth + rate limit) with its own dedicated rateLimiter bucket, one DataStore key per
+	Server/Managers/BloodlineManager.lua. Mirrors MoveEditorSystem.lua's own shape closely: admin Endpoints (AdminGate.
+	Check: auth + rate limit) with its own dedicated rateLimiter bucket, one DataStore key per
 	definition plus a small fixed-key index record maintained via UpdateAsync for atomicity (DataStore
 	has no native "list all keys", and an admin-authored content count is small -- tens, not
 	thousands), schema-versioned records, and explicit-Save-only persistence -- UpdateDraft mutates the
@@ -44,16 +44,13 @@ local Constants = require(ReplicatedStorage.Shared.Constants)
 local RaceTraitTypes = require(ReplicatedStorage.Shared.Race.RaceTraitTypes)
 local BloodlineTypes = require(ReplicatedStorage.Shared.Bloodline.BloodlineTypes)
 local KitTypes = require(ReplicatedStorage.Shared.Kit.KitTypes)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local DataStoreRetry = require(ReplicatedStorage.Shared.DataStoreRetry)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local StorageConfig = require(script.Parent.Parent.Config.StorageConfig)
-local AdminGate = require(script.Parent.Parent.Network.AdminGate)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 local RaceManager = require(script.Parent.Parent.Managers.RaceManager)
 local BloodlineManager = require(script.Parent.Parent.Managers.BloodlineManager)
-local RemoteHandler = require(ReplicatedStorage.Shared.RemoteHandler)
 local AuthoredContentStore = require(script.Parent.Support.AuthoredContentStore)
 
 local KitEditorSystem = {}
@@ -80,19 +77,6 @@ end
 local function bloodlineRecordKey(bloodlineId: string): string
 	return "Bloodline_" .. bloodlineId
 end
-
--- Shared auth + rate-limit precondition -- Server/Network/AdminGate.lua's own Check, the same module
--- MoveEditorSystem's checkMoveEditorPreconditions already wraps.
-local function checkKitEditorPreconditions(player: Player, actionName: string): (boolean, string?)
-	return AdminGate.Check(player, actionName, rateLimiter)
-end
-
--- The pcall boundary every RemoteFunction handler below goes through, bound once to this module's own
--- logger and error result -- see Shared/RemoteHandler.Scoped. This used to be a ten-line local that
--- WAS that binding written out longhand, kept on the grounds that "generalizing that one too was
--- ruled out"; the only difference it actually had from WrapInvoke was baking in the two things
--- WrapInvoke already takes as parameters. Every call site below is unchanged.
-local wrapHandler = RemoteHandler.Scoped(logger, { Success = false, Reason = "InternalError" })
 
 -- The retry/backoff wrapper every DataStore call below goes through, bound once to this module's own
 -- logger and to the ONE policy (Constants.Storage.RetryPolicy). Five Systems each held this same
@@ -212,19 +196,11 @@ end
 -- Race Trait remotes
 --
 
-local function handleListRaceTraits(player: Player): RaceTraitTypes.RaceTraitEditorListResult
-	local allowed, reason = checkKitEditorPreconditions(player, "ListRaceTraits")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleListRaceTraits(_player: Player): RaceTraitTypes.RaceTraitEditorListResult
 	return { Success = true, Traits = RaceManager.List() }
 end
 
-local function handleGetRaceTrait(player: Player, rawTraitId: unknown): RaceTraitTypes.RaceTraitEditorTraitResult
-	local allowed, reason = checkKitEditorPreconditions(player, "GetRaceTrait")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleGetRaceTrait(_player: Player, rawTraitId: unknown): RaceTraitTypes.RaceTraitEditorTraitResult
 	if typeof(rawTraitId) ~= "string" then
 		return { Success = false, Reason = "InvalidTraitId" }
 	end
@@ -237,11 +213,7 @@ end
 
 -- In-memory only -- no DataStore write, see this file's header for why this is what makes an edit
 -- take effect immediately in RaceManager's live registry.
-local function handleUpdateRaceTraitDraft(player: Player, rawTrait: unknown): RaceTraitTypes.RaceTraitEditorTraitResult
-	local allowed, reason = checkKitEditorPreconditions(player, "UpdateRaceTraitDraft")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleUpdateRaceTraitDraft(_player: Player, rawTrait: unknown): RaceTraitTypes.RaceTraitEditorTraitResult
 	local validated, validateReason = RaceManager.Validate(rawTrait)
 	if not validated then
 		return { Success = false, Reason = validateReason }
@@ -251,10 +223,6 @@ local function handleUpdateRaceTraitDraft(player: Player, rawTrait: unknown): Ra
 end
 
 local function handleSaveRaceTrait(player: Player, rawTrait: unknown): RaceTraitTypes.RaceTraitEditorTraitResult
-	local allowed, reason = checkKitEditorPreconditions(player, "SaveRaceTrait")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	local validated, validateReason = RaceManager.Validate(rawTrait)
 	if not validated then
 		return { Success = false, Reason = validateReason }
@@ -282,10 +250,6 @@ local function handleSaveRaceTrait(player: Player, rawTrait: unknown): RaceTrait
 end
 
 local function handleDeleteRaceTrait(player: Player, rawTraitId: unknown): RaceTraitTypes.RaceTraitEditorActionResult
-	local allowed, reason = checkKitEditorPreconditions(player, "DeleteRaceTrait")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawTraitId) ~= "string" then
 		return { Success = false, Reason = "InvalidTraitId" }
 	end
@@ -312,22 +276,14 @@ end
 -- Bloodline remotes
 --
 
-local function handleListBloodlines(player: Player): BloodlineTypes.BloodlineEditorListResult
-	local allowed, reason = checkKitEditorPreconditions(player, "ListBloodlines")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
+local function handleListBloodlines(_player: Player): BloodlineTypes.BloodlineEditorListResult
 	return { Success = true, Bloodlines = BloodlineManager.List() }
 end
 
 local function handleGetBloodline(
-	player: Player,
+	_player: Player,
 	rawBloodlineId: unknown
 ): BloodlineTypes.BloodlineEditorBloodlineResult
-	local allowed, reason = checkKitEditorPreconditions(player, "GetBloodline")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawBloodlineId) ~= "string" then
 		return { Success = false, Reason = "InvalidBloodlineId" }
 	end
@@ -339,13 +295,9 @@ local function handleGetBloodline(
 end
 
 local function handleUpdateBloodlineDraft(
-	player: Player,
+	_player: Player,
 	rawBloodline: unknown
 ): BloodlineTypes.BloodlineEditorBloodlineResult
-	local allowed, reason = checkKitEditorPreconditions(player, "UpdateBloodlineDraft")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	local validated, validateReason = BloodlineManager.Validate(rawBloodline)
 	if not validated then
 		return { Success = false, Reason = validateReason }
@@ -355,10 +307,6 @@ local function handleUpdateBloodlineDraft(
 end
 
 local function handleSaveBloodline(player: Player, rawBloodline: unknown): BloodlineTypes.BloodlineEditorBloodlineResult
-	local allowed, reason = checkKitEditorPreconditions(player, "SaveBloodline")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	local validated, validateReason = BloodlineManager.Validate(rawBloodline)
 	if not validated then
 		return { Success = false, Reason = validateReason }
@@ -392,10 +340,6 @@ local function handleDeleteBloodline(
 	player: Player,
 	rawBloodlineId: unknown
 ): BloodlineTypes.BloodlineEditorActionResult
-	local allowed, reason = checkKitEditorPreconditions(player, "DeleteBloodline")
-	if not allowed then
-		return { Success = false, Reason = reason }
-	end
 	if typeof(rawBloodlineId) ~= "string" then
 		return { Success = false, Reason = "InvalidBloodlineId" }
 	end
@@ -531,42 +475,34 @@ function KitEditorSystem.Init(): ()
 	task.spawn(loadPersistedRaceTraits)
 	task.spawn(loadPersistedBloodlines)
 
-	local listRaceTraitsRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ListRaceTraits)
-	listRaceTraitsRemote.OnServerInvoke = wrapHandler("ListRaceTraits", handleListRaceTraits)
-
-	local getRaceTraitRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.GetRaceTrait)
-	getRaceTraitRemote.OnServerInvoke = wrapHandler("GetRaceTrait", handleGetRaceTrait)
-
-	local updateRaceTraitDraftRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.UpdateRaceTraitDraft)
-	updateRaceTraitDraftRemote.OnServerInvoke = wrapHandler("UpdateRaceTraitDraft", handleUpdateRaceTraitDraft)
-
-	local saveRaceTraitRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.SaveRaceTrait)
-	saveRaceTraitRemote.OnServerInvoke = wrapHandler("SaveRaceTrait", handleSaveRaceTrait)
-
-	local deleteRaceTraitRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.DeleteRaceTrait)
-	deleteRaceTraitRemote.OnServerInvoke = wrapHandler("DeleteRaceTrait", handleDeleteRaceTrait)
-
-	local listBloodlinesRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.ListBloodlines)
-	listBloodlinesRemote.OnServerInvoke = wrapHandler("ListBloodlines", handleListBloodlines)
-
-	local getBloodlineRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.GetBloodline)
-	getBloodlineRemote.OnServerInvoke = wrapHandler("GetBloodline", handleGetBloodline)
-
-	local updateBloodlineDraftRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.UpdateBloodlineDraft)
-	updateBloodlineDraftRemote.OnServerInvoke = wrapHandler("UpdateBloodlineDraft", handleUpdateBloodlineDraft)
-
-	local saveBloodlineRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.SaveBloodline)
-	saveBloodlineRemote.OnServerInvoke = wrapHandler("SaveBloodline", handleSaveBloodline)
-
-	local deleteBloodlineRemote = NetworkBridge.CreateRemoteFunction(Config.RemoteNames.DeleteBloodline)
-	deleteBloodlineRemote.OnServerInvoke = wrapHandler("DeleteBloodline", handleDeleteBloodline)
-
-	PlayerLifecycle.BindAllPlayers({
-		Scope = "KitEditorSystem",
-		OnPlayerRemoving = function(player: Player)
-			rateLimiter:Clear(player)
-		end,
-	})
+	-- Every handler below is reached only through an admin Endpoint: AdminGate's auth, then this System's rate limit, then the
+	-- pcall that answers InternalError. A refusal answers { Success = false, Reason = "NotAuthorized" | "RateLimited" }, as the
+	-- hand-written gate at the top of each handler used to.
+	local endpoint = Endpoint.Scope("KitEditorSystem", logger)
+	local handlers: { [string]: (Player, ...any) -> any } = {
+		ListRaceTraits = handleListRaceTraits,
+		GetRaceTrait = handleGetRaceTrait,
+		UpdateRaceTraitDraft = handleUpdateRaceTraitDraft,
+		SaveRaceTrait = handleSaveRaceTrait,
+		DeleteRaceTrait = handleDeleteRaceTrait,
+		ListBloodlines = handleListBloodlines,
+		GetBloodline = handleGetBloodline,
+		UpdateBloodlineDraft = handleUpdateBloodlineDraft,
+		SaveBloodline = handleSaveBloodline,
+		DeleteBloodline = handleDeleteBloodline,
+	}
+	for key, handler in handlers do
+		endpoint.Function({
+			Name = Config.RemoteNames[key],
+			Limiter = rateLimiter,
+			Admin = true,
+			ErrorResult = { Success = false, Reason = "InternalError" },
+			Denied = function(reason: string): any
+				return { Success = false, Reason = reason }
+			end,
+			Handler = handler,
+		})
+	end
 
 	logger:info("KitEditorSystem.Init() complete")
 end

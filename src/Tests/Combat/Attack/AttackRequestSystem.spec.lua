@@ -418,6 +418,37 @@ return function()
 			expect(SwingSequencer.GetStageIndex(attacker.Model, "Basic", last)).to.equal(0)
 		end)
 
+		it("buffers a press made before the impact frame of the swing it follows", function()
+			-- The 2026-10-26 widening: a click on the swing, not only after the hit, is a press. Made the moment
+			-- this swing's windup is over -- the earliest a player watching the swing reacts to it.
+			local attacker = spawnDummy("EarlyClick", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local entry = AttackCatalog.Get(`default:{FIRST_WEAPON}:Basic:1`) :: any
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			local pressedAt = base + entry.Definition.WindupSeconds
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic" }, false, pressedAt)
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, pressedAt)).to.equal(true)
+			expect(chainGateSeconds() - entry.Definition.WindupSeconds < BUFFER).to.equal(true)
+		end)
+
+		it("drops a buffered press when a stunning hit lands on its owner", function()
+			-- Being interrupted costs the exchange: the press was aimed past a swing the hit just cut.
+			local attacker = spawnDummy("HitMidBuffer", Vector3.new(0, 5, 0))
+			local base = os.clock()
+			local seen = {}
+			local disconnect = AttackRequestSystem.OnPressRefused(function(_model, pressId, reason)
+				table.insert(seen, { PressId = pressId, Reason = reason })
+			end)
+			AttackRequestSystem.Throw(attacker.Model, { Kind = "Basic" }, false, base)
+			AttackRequestSystem.Press(attacker.Model, { Kind = "Basic", PressId = 5 }, false, base + 0.01)
+			AttackRequestSystem.NoteStunned(attacker.Model)
+			disconnect()
+
+			expect(AttackRequestSystem.HasBufferedPress(attacker.Model, base + 0.02)).to.equal(false)
+			expect(#seen).to.equal(1)
+			expect(seen[1].PressId).to.equal(5)
+		end)
+
 		it("keeps a press buffered through a stun parry's window, so a landed parry can counter", function()
 			-- The one guard that waits rather than drops (waitsOutGuard): a parry window is decided within its
 			-- own few tenths of a second, and the buffered M1 is the counter a landed stun parry earns.
@@ -974,8 +1005,6 @@ return function()
 			expect(fists).to.be.ok()
 			expect(fists.Profile.HitstunSeconds).to.equal(DamageConstants.HitstunFor("Fists", "Basic"))
 			expect(fists.Profile.HitstunSeconds < DamageConstants.Hitstun.Seconds).to.equal(true)
-			-- The ceiling that keeps a press buffered at the moment of being hit from firing out of the stun.
-			expect(fists.Profile.HitstunSeconds > AttackConstants.Input.BufferSeconds).to.equal(true)
 		end)
 	end)
 

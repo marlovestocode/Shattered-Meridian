@@ -266,24 +266,6 @@ function BoatDrive.Step(
 	}
 end
 
--- Bounds how far `target` may lead `actualPosition`, clamping only the DISTANCE between them along the
--- straight line that already separates them -- the direction and `target`'s own rotation are untouched.
--- See Server/Blimp/BlimpDrive.ClampLead's header for the debt-discharge problem this exists to bound;
--- it is the same problem on a boat and the same fix.
---
--- Returns `target` UNCHANGED (the same value, not an equal copy) when it is already within the bound,
--- which is every tick of a clean passage -- the caller relies on that to know whether it needs to write
--- anything back into the state at all.
-function BoatDrive.ClampLead(target: CFrame, actualPosition: Vector3, maxLeadStuds: number): CFrame
-	local offset = target.Position - actualPosition
-	local distance = offset.Magnitude
-	if distance <= maxLeadStuds then
-		return target
-	end
-	local clampedPosition = actualPosition + (offset / distance) * maxLeadStuds
-	return target.Rotation + clampedPosition
-end
-
 -- What the orientation constraint is actually given: the upright target, plus the heel and trim the
 -- current moment earns. Derived, never stored -- see BoatTypes.DriveState.
 --

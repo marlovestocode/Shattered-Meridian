@@ -47,7 +47,7 @@
 	   does, so the distinction stops being something a new call site can get wrong.
 
 	3. RE-CHECK THE CHARACTER AFTER THE YIELD. A fast respawn during the Humanoid wait means the
-	   character this handler is about to bind is already the PREVIOUS body. ShiftLockCamera and
+	   character this handler is about to bind is already the PREVIOUS body. CombatCamera and
 	   FlightCamera both guarded this by hand (`if localPlayer.Character ~= character then return`);
 	   most sites did not, and would bind a corpse for the rest of the life. Applied uniformly here.
 

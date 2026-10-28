@@ -24,10 +24,9 @@
 	would win whenever it happened to arrive last. The character menu reads those from ClientState
 	and these from here.
 
-	PUSH AND PULL, both needed for the same reason BountyMenu needs both: the push (on profile load,
-	and on any later Refresh) keeps an already-open panel honest, and the pull covers a client whose
-	profile-load push fired long before it ever opened the menu -- nothing caches an unheard
-	RemoteEvent.
+	PUSH ONLY (2026-10-27, coworking W8). The push (on profile load, and on any later Refresh) is cached on the client by
+	ClientState, and a client that was not listening yet asks for it again through PlayerState_Replay (this System's
+	"CharacterSheet" snapshot, registered in Init). The Character_GetSheet pull this used to need for exactly that case is gone.
 
 	Does not own: any of these values (PlayerDataSystem holds them; CharacterCreationSystem writes
 	the chargen ones, FactionManager/BloodlineManager will write the rest once they stop being
@@ -40,11 +39,11 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("CharacterSheetSystem")
 
@@ -52,8 +51,7 @@ local CharacterSheetSystem = {}
 
 local sheetRemote: RemoteEvent? = nil
 -- The sheet each player was last pushed, so a Refresh that would send the same thing sends nothing.
-local lastSent: { [Player]: Types.CharacterSheetPayload } = {}
-local requestRateLimiter = RateLimiter.New(Constants.CharacterSheet.RequestMaxCallsPerSecond)
+local lastSent: { [Player]: Types.CharacterSheetPayload } = PlayerScoped.New("CharacterSheetSystem.lastSent")
 
 -- The pure profile -> payload projection, exported so TestEZ can exercise it against a plain
 -- profile literal with no live Player and no DataStore -- the same "pure logic gets its own export"
@@ -146,31 +144,21 @@ function CharacterSheetSystem.Refresh(player: Player): ()
 	sheetRemote:FireClient(player, sheet)
 end
 
-local function handleGetSheet(player: Player): Types.CharacterSheetPayload?
-	return CharacterSheetSystem.GetSheet(player)
-end
-
 function CharacterSheetSystem.Init(): ()
+	-- Sent even when unchanged since the last push: the asker did not hear that one.
+	PlayerStateSystem.Register("CharacterSheet", function(player: Player)
+		local sheet = CharacterSheetSystem.GetSheet(player)
+		if sheet and sheetRemote then
+			lastSent[player] = sheet
+			sheetRemote:FireClient(player, sheet)
+		end
+	end)
 	local endpoint = Endpoint.Scope("CharacterSheetSystem", logger)
 	sheetRemote = endpoint.Push(Constants.CharacterSheet.RemoteNames.SheetUpdated)
-
-	-- nil is the answer to a rate-limited or failed request (ErrorResult is absent on purpose): the client treats it as "no sheet yet".
-	endpoint.Function({
-		Name = Constants.CharacterSheet.RemoteNames.GetSheet,
-		Limiter = requestRateLimiter,
-		Handler = handleGetSheet,
-	} :: any)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(function(player: Player)
 		CharacterSheetSystem.Refresh(player)
 	end)
-	PlayerLifecycle.BindAllPlayers({
-		Scope = "CharacterSheetSystem",
-		OnPlayerRemoving = function(player: Player)
-			requestRateLimiter:Clear(player)
-			lastSent[player] = nil
-		end,
-	})
 
 	-- Defensive pass for a profile that loaded before this Init() ran -- same reasoning
 	-- QiSystem.Init()/TierSystem.Init()/ArtSystem.Init() all document for their own GetPlayers() loops.

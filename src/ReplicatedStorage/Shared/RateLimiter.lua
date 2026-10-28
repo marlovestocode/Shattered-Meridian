@@ -26,6 +26,7 @@
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Logger = require(ReplicatedStorage.Shared.Logger)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 
 local logger = Logger.scope("RateLimiter")
 
@@ -56,7 +57,8 @@ function RateLimiter.New(maxPerSecond: number): RateLimiterInstance
 	return setmetatable({
 		maxPerSecond = maxPerSecond,
 		origin = `{source or "unknown"}:{line or 0}`,
-		buckets = {},
+		-- Player-scoped (Shared/PlayerScoped): a leaver's bucket is dropped for them, so no System clears it on PlayerRemoving.
+		buckets = PlayerScoped.Adopt({}),
 	}, RateLimiter)
 end
 
@@ -86,8 +88,8 @@ function RateLimiter.IsLimited(self: RateLimiterInstance, player: Player): boole
 	return false
 end
 
--- Drops `player`'s bucket -- call on PlayerRemoving so buckets don't accumulate for players who
--- have left, the same reason every per-player state table in this codebase clears its entry then.
+-- Drops `player`'s bucket now. NOT needed on PlayerRemoving any more -- the buckets are player-scoped and go when the player does;
+-- this is for a System that wants a fresh budget mid-session, and for specs.
 function RateLimiter.Clear(self: RateLimiterInstance, player: Player): ()
 	self.buckets[player] = nil
 end

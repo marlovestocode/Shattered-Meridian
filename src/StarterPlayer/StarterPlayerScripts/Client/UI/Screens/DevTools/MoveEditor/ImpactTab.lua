@@ -19,6 +19,12 @@
 	A weapon stage carries neither: its launch and finish are the air combo's (AirComboSystem), so a
 	Default move shows only its costs. A projectile move carries no grab (Validate refuses the pair),
 	so its GRAB section is hidden; its knockback pushes along the shot's flight.
+
+	RAGDOLL (2026-10-27) is the fourth section, and the one every move shows, weapon stages included (a
+	Default move's override carries it -- DefaultMoveRegistry's header). It is built entirely from
+	Shared/Ragdoll/RagdollTypes.Fields -- each field's label, unit, steps, decimals and range come from there and
+	its hint from Copy.RagdollHints -- so a field added to the schema appears here with no edit to this file.
+	It is hidden while the move launches (Validate refuses the pair). On a grab move it applies on the throw.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -26,6 +32,7 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local RagdollTypes = require(ReplicatedStorage.Shared.Ragdoll.RagdollTypes)
 
 local Copy = require(script.Parent.Copy)
 local Fields = require(script.Parent.Fields)
@@ -52,6 +59,113 @@ for _, modeName in GrabConstants.ModeOrder do
 	table.insert(GRAB_MODE_OPTIONS, { Value = modeName, Text = GrabConstants.Modes[modeName].Label })
 end
 
+local RAGDOLL_PRESET_OPTIONS = {}
+local RAGDOLL_PRESET_NOTES: { [string]: string } = {}
+for _, preset in RagdollTypes.Presets do
+	table.insert(RAGDOLL_PRESET_OPTIONS, { Value = preset.Id, Text = preset.Label })
+	RAGDOLL_PRESET_NOTES[preset.Id] = preset.Note
+end
+
+local RAGDOLL_TRIGGER_OPTIONS = {}
+for _, trigger in RagdollTypes.Triggers do
+	table.insert(RAGDOLL_TRIGGER_OPTIONS, { Value = trigger, Text = RagdollTypes.TriggerLabels[trigger] })
+end
+
+-- The RAGDOLL section's fields: the toggle, the presets, then one field per RagdollTypes.Fields entry.
+local function ragdollBody(scope: Scope, context: Fields.FormContext): { Instance }
+	local hasRagdoll = scope:Computed(function(use)
+		local move = use(context.Draft)
+		return move ~= nil and move.Ragdoll ~= nil
+	end)
+	local hints = Copy.RagdollHints :: { [string]: string }
+	local children: { Instance } = {
+		Fields.Toggle(scope, context, {
+			Label = "Ragdoll the target",
+			Hint = hints.Enabled,
+			LayoutOrder = 1,
+			Get = function(move)
+				return move.Ragdoll ~= nil
+			end,
+			Set = function(move, on)
+				move.Ragdoll = if on then RagdollTypes.Defaults() else nil
+			end,
+		}),
+		Fields.ActionChips(scope, context, {
+			Label = "Start from",
+			Options = RAGDOLL_PRESET_OPTIONS,
+			Describe = RAGDOLL_PRESET_NOTES,
+			Hint = hints.Preset,
+			LayoutOrder = 2,
+			Visible = hasRagdoll,
+			Apply = function(move, id)
+				local preset = RagdollTypes.PresetById(id)
+				if move.Ragdoll and preset then
+					RagdollTypes.ApplyPreset(move.Ragdoll, preset)
+				end
+			end,
+		}),
+	}
+	for index, field in RagdollTypes.Fields do
+		local name = field.Name
+		local order = 2 + index
+		local get = function(move: Move): any
+			return if move.Ragdoll then (move.Ragdoll :: any)[name] else field.Default
+		end
+		local set = function(move: Move, value: any)
+			if move.Ragdoll then
+				(move.Ragdoll :: any)[name] = value
+			end
+		end
+		if field.Kind == "Number" then
+			table.insert(
+				children,
+				Fields.Number(scope, context, {
+					Label = field.Label,
+					Unit = field.Unit,
+					Range = RagdollTypes.Limits[name],
+					Steps = field.Steps or { 0.1, 1 },
+					Decimals = field.Decimals,
+					Hint = hints[name],
+					LayoutOrder = order,
+					Visible = hasRagdoll,
+					Get = get,
+					Set = set,
+				})
+			)
+		elseif field.Kind == "Enum" then
+			table.insert(
+				children,
+				Fields.Chips(scope, context, {
+					Label = field.Label,
+					Options = if name == "Trigger"
+						then RAGDOLL_TRIGGER_OPTIONS
+						else Fields.OptionsOf(field.Options :: { any }),
+					Hint = hints[name],
+					LayoutOrder = order,
+					Visible = hasRagdoll,
+					Get = get,
+					Set = set,
+				})
+			)
+		else
+			table.insert(
+				children,
+				Fields.Toggle(scope, context, {
+					Label = field.Label,
+					Hint = hints[name],
+					LayoutOrder = order,
+					Visible = hasRagdoll,
+					Get = function(move)
+						return get(move) == true
+					end,
+					Set = set,
+				})
+			)
+		end
+	end
+	return children
+end
+
 local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: UsedAs<boolean>): ScrollingFrame
 	local isCustom = scope:Computed(function(use)
 		return not use(context.IsDefault)
@@ -65,6 +179,15 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 	local canGrab = scope:Computed(function(use)
 		local move = use(context.Draft)
 		return use(isCustom) and move ~= nil and move.Projectile == nil and move.Domain == nil
+	end)
+	-- Any move, Default and grab included -- unless it launches (Validate refuses that pair). A grab's ragdoll
+	-- happens on the throw.
+	local canRagdoll = scope:Computed(function(use)
+		local move = use(context.Draft)
+		if move == nil then
+			return false
+		end
+		return not (move.Knockback ~= nil and move.Knockback.StartsAirCombo == true)
 	end)
 	local isCustomProjectile = scope:Computed(function(use)
 		local move = use(context.Draft)
@@ -220,6 +343,18 @@ local function ImpactTab(scope: Scope, context: Fields.FormContext, visible: Use
 			LayoutOrder = 3,
 			Visible = canGrab,
 			Build = grabBody,
+		}),
+		Fields.Section(scope, {
+			Title = "RAGDOLL",
+			Summary = scope:Computed(function(use)
+				local move = use(context.Draft)
+				return RagdollTypes.Summary(if move then move.Ragdoll else nil)
+			end),
+			LayoutOrder = 4,
+			Visible = canRagdoll,
+			Build = function()
+				return ragdollBody(scope, context)
+			end,
 		}),
 		Fields.Prose(
 			scope,

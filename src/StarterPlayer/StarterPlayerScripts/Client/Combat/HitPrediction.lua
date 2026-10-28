@@ -206,7 +206,8 @@ local function onAttackStarted(payload: AttackTypes.AttackStartedPayload): ()
 		stop()
 		return
 	end
-	local now = os.clock()
+	-- The swing's own start: see AttackInputClient.GetSwingStartedAt.
+	local now = AttackInputClient.GetSwingStartedAt()
 	local opensAt = now + payload.WindupSeconds
 	pending = {
 		MoveId = payload.MoveId,

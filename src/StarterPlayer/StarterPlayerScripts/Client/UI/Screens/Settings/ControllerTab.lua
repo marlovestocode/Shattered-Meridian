@@ -39,9 +39,8 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
+local SettingsRows = require(script.Parent.SettingsRows)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
-local Label = require(script.Parent.Parent.Parent.Components.Label)
-local Stepper = require(script.Parent.Parent.Parent.Components.Stepper)
 local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
 
 local Children = Fusion.Children
@@ -128,99 +127,6 @@ local NUMBER_ROWS: {
 		},
 	}
 
--- Copied from GameplayTab.lua rather than shared, and that is a deliberate line to hold: it is eight
--- lines of tab-local layout, and hoisting it into Components/ would make it a shared contract that
--- both tabs then have to agree about forever. If a third tab wants one, that is the moment it earns
--- a component.
-local function sectionLabel(scope: Scope, text: string, layoutOrder: number): Frame
-	return scope:New "Frame" {
-		Name = "SectionLabel",
-		Size = UDim2.new(1, 0, 0, 22),
-		BackgroundTransparency = 1,
-		LayoutOrder = layoutOrder,
-
-		[Children] = Label(scope, {
-			Text = text,
-			Scale = "Detail",
-			Color = Tokens.Color.TextSecondary,
-			AnchorPoint = Vector2.new(0, 1),
-			Position = UDim2.fromScale(0, 1),
-		}),
-	} :: Frame
-end
-
--- A labelled row holding a Stepper on the right. Toggle.lua already draws its own label/hint pair, so
--- this exists only for the numeric rows, which have no such component.
-local function numberRow(
-	scope: Scope,
-	label: string,
-	hint: string,
-	value: UsedAs<number>,
-	min: number,
-	max: number,
-	step: number,
-	format: (number) -> string,
-	onChanged: (number) -> (),
-	layoutOrder: number
-): Frame
-	return scope:New "Frame" {
-		Name = `Row_{label}`,
-		Size = UDim2.fromScale(1, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
-		LayoutOrder = layoutOrder,
-
-		[Children] = {
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				Padding = UDim.new(0, 2),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			-- The label and the control share a row; the hint sits under both, full width, the same
-			-- reading order Toggle.lua establishes for its own hint.
-			scope:New "Frame" {
-				Name = "Control",
-				Size = UDim2.new(1, 0, 0, 32),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
-
-				[Children] = {
-					Label(scope, {
-						Text = label,
-						Scale = "Body",
-						Color = Tokens.Color.TextPrimary,
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					-- Stepper, like Dropdown, exports a MODULE with a .Mount rather than being directly
-					-- callable (Toggle/Label are plain functions) -- see Components/Stepper.lua's own
-					-- StepperModule, which also carries the WIDTH the Onboarding screen budgets against.
-					Stepper.Mount(scope, {
-						Value = value,
-						Min = min,
-						Max = max,
-						Step = step,
-						FormatValue = format,
-						OnChanged = onChanged,
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.fromScale(1, 0.5),
-					}),
-				},
-			},
-			Label(scope, {
-				Text = hint,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.fromScale(1, 0),
-				AutomaticSize = Enum.AutomaticSize.Y,
-				TextWrapped = true,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				LayoutOrder = 2,
-			}),
-		},
-	} :: Frame
-end
-
 local function ControllerTab(scope: Scope, props: ControllerTabProps): ScrollingFrame
 	-- One Computed per field off the single Gamepad Value, so the screen re-renders from one source
 	-- of truth rather than from five independently-written Values that could disagree. Same shape as
@@ -245,7 +151,7 @@ local function ControllerTab(scope: Scope, props: ControllerTabProps): Scrolling
 			SortOrder = Enum.SortOrder.LayoutOrder,
 		},
 
-		sectionLabel(scope, "STICKS", 1),
+		SettingsRows.SectionLabel(scope, "STICKS", 1),
 	}
 
 	for index, row in NUMBER_ROWS do
@@ -253,7 +159,7 @@ local function ControllerTab(scope: Scope, props: ControllerTabProps): Scrolling
 		local bounds = (Constants.Settings.Gamepad.Bounds :: { [string]: any })[row.Bounds]
 		table.insert(
 			rows,
-			numberRow(
+			SettingsRows.NumberRow(
 				scope,
 				row.Label,
 				row.Hint,
@@ -283,7 +189,7 @@ local function ControllerTab(scope: Scope, props: ControllerTabProps): Scrolling
 		})
 	)
 
-	table.insert(rows, sectionLabel(scope, "FEEDBACK", 3 + #NUMBER_ROWS))
+	table.insert(rows, SettingsRows.SectionLabel(scope, "FEEDBACK", 3 + #NUMBER_ROWS))
 	table.insert(
 		rows,
 		Toggle(scope, {

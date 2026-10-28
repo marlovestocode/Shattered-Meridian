@@ -62,6 +62,7 @@ local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
 local ProjectileBody = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileBody)
+local ProjectileMotion = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileMotion)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
@@ -258,6 +259,14 @@ function HitboxWorldPreview.Start(handle: MoveEditorHandle): ()
 			origin = CFrame.new(anchor.Position) * CFrame.Angles(0, yaw, 0) * CFrame.new(0, 0, -domain.CenterForward)
 		else
 			origin = anchor.CFrame * move.Offset
+			local spec = move.Projectile
+			if spec then
+				-- The spawn height, as the server lifts it. "The ground" stands in as the feet under the
+				-- character (an R6 root sits three studs up), which is where the server's cast lands on flat floor.
+				local root = rootPart
+				local groundY = if root then root.Position.Y - 3 else nil
+				origin = ProjectileMotion.Raise(spec, origin, groundY)
+			end
 		end
 		local _, _, turn = previewVolume(move)
 

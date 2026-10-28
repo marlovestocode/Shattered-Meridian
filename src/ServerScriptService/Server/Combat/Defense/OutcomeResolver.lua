@@ -262,8 +262,10 @@ end
 
 -- Collapses swings that MET into Trades, in place (DefenseConstants.Clash). Returns how many contacts it
 -- turned. Two rules, both over Clean melee contacts only:
---   * MUTUAL IN ONE BATCH: two Clean contacts where each one's attacker is the other's defender -- both
---     hits landed in the same server frame. Both become Trades.
+--   * MUTUAL AT ONE INSTANT: two Clean contacts where each one's attacker is the other's defender, found at
+--     the same SampleTime (the same engine substep) -- both hits landed at once. Both become Trades. A
+--     mutual pair at two different substeps is not a clash unless the first rule below already caught the
+--     earlier one: the earlier hit lands, and DefenseSystem drops the later one, whose swing that hit cut.
 --   * THE DEFENDER'S BLADE WAS OUT: a Clean contact whose defender's own swing was Active and already
 --     reaching the attacker when it landed (PendingContact.DefenderSwingReaches, measured in pass 1).
 --     The one contact becomes a Trade; applyContact cancels the defender's swing along with the
@@ -311,7 +313,11 @@ function OutcomeResolver.ArbitrateClashes(contacts: { PendingContact }): number
 			if second.Result.Kind ~= "Clean" or isProjectile(second) then
 				continue
 			end
-			if first.Attacker == second.Defender and first.Defender == second.Attacker then
+			if
+				first.Attacker == second.Defender
+				and first.Defender == second.Attacker
+				and first.SampleTime == second.SampleTime
+			then
 				turn(first)
 				turn(second)
 				break

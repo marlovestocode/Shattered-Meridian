@@ -1,0 +1,16 @@
+{
+  "bare_remote_handlers": 0,
+  "duplicate_functions": 3,
+  "highlight_bypass": 0,
+  "load_animation_bypass": 4,
+  "nan_checks": 61,
+  "raw_input_files": 0,
+  "restraint_reads": 0,
+  "settings_hub_requires": 0,
+  "shared_render_priority": 2,
+  "spec_rig_builders": 0,
+  "stale_combatsystem": 160,
+  "typeof_server": 206,
+  "unscoped_player_tables": 18,
+  "vessel_shared_lines": 395
+}

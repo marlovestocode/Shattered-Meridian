@@ -13,32 +13,26 @@
 	BreakRangeStuds, stays out of line of sight past OcclusionGraceSeconds, or when the local body dies,
 	mounts a vessel or starts flying.
 
-	A SOFT CAMERA LOCK. Every frame, BEFORE the default camera scripts run (RenderPriority.Camera - 1), the
-	camera's look is pulled toward the target on a critically damped spring (LockOnConstants.Camera's own
-	note on why a spring rather than an ease), softened at close range. The default camera reads its look direction back off
-	Camera.CFrame, so it then applies the player's own mouse/stick input, zoom and occlusion on top of the
-	eased look: the player can still glance around and is pulled back. Running before rather than after
-	the camera scripts is what keeps occlusion correct, and it means ShiftLockCamera (Camera + 1) turns
-	the body toward the already-eased camera -- with shift lock on, a locked player faces the target.
-	Only a Custom camera is steered. A Scriptable one belongs to a vehicle or flight camera.
+	THE CAMERA IS NOT STEERED HERE. Client/Camera/CombatCamera.lua (the combat camera manager) owns the soft pull of the
+	look toward the target, and calls Step from its own aim step every frame, BEFORE the default camera scripts
+	(its CombatCameraAim slot): Step runs the break rules, draws the marker and hands back the point to aim at. This
+	module used to bind that render step itself and write Camera.CFrame from inside it, which put a second camera writer
+	in the Combat folder beside shift lock's, ordered against it only by a priority value.
 
 	THE TARGET IS AIM AND PRESENTATION, NEVER TRUSTED. It is never sent to the server. Swing tracking
 	(SwingTracking.lua) reads GetTarget to turn the body during a windup, and the server's hitbox reads the
 	body's real replicated facing like any other swing.
 
-	Does not own: the candidate list (CombatTargets.lua), turning the body during a swing (SwingTracking),
+	Does not own: the camera (CombatCamera), the candidate list (CombatTargets.lua), turning the body during a swing (SwingTracking),
 	the marker's look (Screens/LockOnMarker), or any opponent's guard value (DefenseSystem publishes it).
 ]]
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local RunService = game:GetService("RunService")
 local Workspace = game:GetService("Workspace")
 
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 
-local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
-local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local LockOnConstants = require(ReplicatedStorage.Shared.Combat.LockOnConstants)
@@ -46,6 +40,7 @@ local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local LockOnMarkerModule = require(script.Parent.Parent.UI.Screens.LockOnMarker)
@@ -54,17 +49,11 @@ local CombatTargets = require(script.Parent.CombatTargets)
 
 local logger = Logger.scope("LockOnController")
 
-local RENDER_STEP_NAME = "LockOnCameraUpdate"
-
 local LockOnController = {}
 
 local target: Model? = nil
 -- When the target was last in line of sight (os.clock), for OcclusionGraceSeconds.
 local lastVisibleAt = 0
--- The camera pull's angular velocities (radians/second), carried frame to frame by the spring. Zeroed on
--- every target change, so a new lock starts from rest rather than inheriting the last one's swing.
-local yawVelocity = 0
-local pitchVelocity = 0
 
 local character: Model? = nil
 local humanoid: Humanoid? = nil
@@ -89,8 +78,6 @@ local function setTarget(newTarget: Model?): ()
 	end
 	target = newTarget
 	lastVisibleAt = os.clock()
-	yawVelocity = 0
-	pitchVelocity = 0
 	local handle = marker
 	if handle then
 		handle.SetVisible(false)
@@ -105,11 +92,11 @@ end
 -- Whether the local body is in any state that cannot hold a lock.
 local function bodyRefusesLock(): boolean
 	local currentHumanoid = humanoid
-	if currentHumanoid == nil or currentHumanoid.Health <= 0 or rootPart == nil then
+	if currentHumanoid == nil or rootPart == nil then
 		return true
 	end
-	return currentHumanoid:GetAttribute(AttributeConstants.Mounted) == true
-		or currentHumanoid:GetAttribute(AttributeConstants.Flying) == true
+	-- BodyRestraint's "LockOn" row: dead, mounted or flying.
+	return BodyRestraint.Restrained(currentHumanoid, "LockOn")
 end
 
 -- The live combatant nearest the centre of the screen, inside the acquire cone and range, or nil.
@@ -163,70 +150,6 @@ local function hasLineOfSight(origin: Vector3, aim: Vector3, targetModel: Model)
 	return Workspace:Raycast(origin, aim - origin, sightParams) == nil
 end
 
--- Pulls the camera's look toward `aim` by `deltaTime`. See this file's header on why this runs before the
--- default camera scripts and writes only the look, never the position they are about to recompute.
---
--- The spring's VALUE is re-read off the camera every frame rather than kept here, so the player's own
--- mouse or stick input (applied by the camera scripts between two calls) is simply where the spring
--- resumes from; only the velocity is this module's memory.
-local function pullCamera(camera: Camera, aim: Vector3, bodyPosition: Vector3, deltaTime: number): ()
-	local tuning = LockOnConstants.Camera
-	local focus = camera.Focus.Position
-	local direction = aim - focus
-	local flat = Vector3.new(direction.X, 0, direction.Z)
-	-- HOW CLOSE THE FIGHT IS is a fact about the BODY, so the stand-down and the close-range softening below
-	-- both read the distance from the root. The focus carries the shoulder offset and CameraFollow's trail, so
-	-- measured from it the gate moved with the camera and could cut out and restart from rest mid-exchange.
-	-- The LOOK still aims from the focus: that is the point the camera scripts orbit.
-	local bodyOffset = aim - bodyPosition
-	local bodyDistance = Vector3.new(bodyOffset.X, 0, bodyOffset.Z).Magnitude
-	if bodyDistance < tuning.MinDistanceStuds then
-		-- Stood down, so the next frame back in range starts the pull from rest.
-		yawVelocity = 0
-		pitchVelocity = 0
-		return
-	end
-	local look = camera.CFrame.LookVector
-	local currentYaw = CombatTargets.YawOf(look)
-	local desiredYaw = CombatTargets.YawOf(flat)
-	if currentYaw == nil or desiredYaw == nil then
-		return
-	end
-	local currentPitch = math.asin(math.clamp(look.Y, -1, 1))
-	local desiredPitch =
-		math.clamp(math.atan2(direction.Y, flat.Magnitude) + tuning.PitchBias, tuning.MinPitch, tuning.MaxPitch)
-
-	-- Softer at arm's length, where small movements are big angles. 1 at CloseRangeStuds and beyond, down to
-	-- CloseRangeScale at MinDistanceStuds.
-	local closeness = math.clamp(
-		(bodyDistance - tuning.MinDistanceStuds) / math.max(tuning.CloseRangeStuds - tuning.MinDistanceStuds, 1e-3),
-		0,
-		1
-	)
-	local scale = tuning.CloseRangeScale + (1 - tuning.CloseRangeScale) * closeness
-
-	-- The yaw target is unwrapped next to the current yaw, so the spring always turns the short way round.
-	local yaw, nextYawVelocity = FlightMath.SpringStep(
-		currentYaw,
-		yawVelocity,
-		currentYaw + CombatTargets.AngleDelta(currentYaw, desiredYaw),
-		tuning.YawFrequency * scale,
-		tuning.Damping,
-		deltaTime
-	)
-	local pitch, nextPitchVelocity = FlightMath.SpringStep(
-		currentPitch,
-		pitchVelocity,
-		desiredPitch,
-		tuning.PitchFrequency * scale,
-		tuning.Damping,
-		deltaTime
-	)
-	yawVelocity = nextYawVelocity
-	pitchVelocity = nextPitchVelocity
-	camera.CFrame = CFrame.new(camera.CFrame.Position) * CFrame.fromOrientation(pitch, yaw, 0)
-end
-
 local function updateMarker(camera: Camera, targetModel: Model, targetRoot: BasePart): ()
 	local handle = marker
 	if handle == nil then
@@ -249,28 +172,30 @@ local function updateMarker(camera: Camera, targetModel: Model, targetRoot: Base
 	handle.SetGuard(if typeof(guard) == "number" then guard else nil)
 end
 
-local function lockStep(deltaTime: number): ()
+-- One frame of the lock: the break rules, the marker, and the point the camera should aim at -- or nil when nothing is
+-- locked, the lock just broke, or there is no camera. Called by CombatCamera's aim step (see this file's header).
+local function lockStep(): Vector3?
 	local current = target
 	if current == nil then
-		return
+		return nil
 	end
 	if bodyRefusesLock() then
 		setTarget(nil)
-		return
+		return nil
 	end
 	local root = rootPart :: BasePart
 	local targetRoot = CombatTargets.LiveRoot(current, character)
 	if targetRoot == nil then
 		setTarget(nil)
-		return
+		return nil
 	end
 	if (targetRoot.Position - root.Position).Magnitude > LockOnConstants.Targeting.BreakRangeStuds then
 		setTarget(nil)
-		return
+		return nil
 	end
 	local camera = Workspace.CurrentCamera
 	if camera == nil then
-		return
+		return nil
 	end
 
 	local aim = targetRoot.Position + Vector3.new(0, LockOnConstants.Targeting.AimHeightStuds, 0)
@@ -279,23 +204,11 @@ local function lockStep(deltaTime: number): ()
 		lastVisibleAt = now
 	elseif now - lastVisibleAt > LockOnConstants.Targeting.OcclusionGraceSeconds then
 		setTarget(nil)
-		return
+		return nil
 	end
 
-	if camera.CameraType == Enum.CameraType.Custom then
-		pullCamera(camera, aim, root.Position, deltaTime)
-	end
 	updateMarker(camera, current, targetRoot)
-end
-
--- Labelled for the MicroProfiler (Ctrl+F6), so a lock-on frame cost shows up as its own bar.
-local function onRenderStep(deltaTime: number): ()
-	if target == nil then
-		return
-	end
-	debug.profilebegin("LockOn")
-	lockStep(deltaTime)
-	debug.profileend()
+	return aim
 end
 
 local function onCharacter(newCharacter: Model, newHumanoid: Humanoid, _life: Trove.TroveInstance): ()
@@ -317,6 +230,18 @@ local function onCharacterRemoving(): ()
 end
 
 -- Public -----------------------------------------------------------------------------------------------
+
+-- Runs this frame of the lock (see lockStep) and returns the point to aim the camera at, or nil. Labelled for the
+-- MicroProfiler (Ctrl+F6), so a lock-on frame cost shows up as its own bar. CombatCamera is the one caller.
+function LockOnController.Step(): Vector3?
+	if target == nil then
+		return nil
+	end
+	debug.profilebegin("LockOn")
+	local aim = lockStep()
+	debug.profileend()
+	return aim
+end
 
 -- The current lock-on target, or nil.
 function LockOnController.GetTarget(): Model?
@@ -354,8 +279,6 @@ function LockOnController.Start(markerHandle: LockOnMarkerModule.LockOnMarkerHan
 		OnCharacter = onCharacter,
 		OnCharacterRemoving = onCharacterRemoving,
 	})
-
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value - 1, onRenderStep)
 
 	logger:info("LockOnController started", { player = Players.LocalPlayer.Name })
 end

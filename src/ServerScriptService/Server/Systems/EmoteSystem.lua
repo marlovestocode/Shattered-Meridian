@@ -108,10 +108,13 @@ local Schema = require(ReplicatedStorage.Shared.Schema)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 local EmoteUnlockService = require(script.Parent.EmoteUnlockService)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("EmoteSystem")
 
@@ -137,7 +140,7 @@ type ActiveEmote = {
 
 -- One entry per player currently playing an emote -- O(concurrent emoters), read once per
 -- OnHeartbeatTick per this file's own header.
-local activeEmotes: { [Player]: ActiveEmote } = {}
+local activeEmotes: { [Player]: ActiveEmote } = PlayerScoped.New("EmoteSystem.activeEmotes")
 
 -- Two independent per-player-per-second budgets built from the SAME EmoteConstants.
 -- MaxRequestsPerSecondPerPlayer number -- CombatSystem.lua's attackRateLimiter/defensiveRateLimiter/
@@ -257,7 +260,7 @@ local function handleRequestPlay(player: Player, emoteId: string): ()
 	-- half-overwrites, which looks like a bug in both systems at once. Read as an Attribute rather than
 	-- through a BlimpSystem require -- the same seam the two combat gates use.
 	local _, gateHumanoid = CharacterUtil.LiveRig(player)
-	if gateHumanoid and gateHumanoid:GetAttribute(AttributeConstants.Mounted) == true then
+	if BodyRestraint.Restrained(gateHumanoid, "Emote") then
 		logger:debug("RequestPlay rejected: Mounted", { player = player.Name, emoteId = emoteId })
 		return
 	end
@@ -430,14 +433,13 @@ local function onHeartbeatTick(): ()
 	end
 end
 
-local function onPlayerRemoving(player: Player): ()
-	activeEmotes[player] = nil
-	playRateLimiter:Clear(player)
-	loadoutRateLimiter:Clear(player)
-	stopRateLimiter:Clear(player)
-end
-
 function EmoteSystem.Init(): ()
+	PlayerStateSystem.Register("Emotes", function(player: Player)
+		if PlayerDataSystem.IsLoaded(player) then
+			sendUnlockedUpdated(player)
+			sendLoadoutUpdated(player)
+		end
+	end)
 	local endpoint = Endpoint.Scope("EmoteSystem", logger)
 	local RemoteNames = EmoteConstants.RemoteNames
 
@@ -478,7 +480,6 @@ function EmoteSystem.Init(): ()
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "EmoteSystem",
-		OnPlayerRemoving = onPlayerRemoving,
 	})
 
 	logger:info("EmoteSystem.Init() complete")

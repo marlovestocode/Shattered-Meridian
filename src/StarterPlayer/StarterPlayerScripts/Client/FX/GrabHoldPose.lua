@@ -42,6 +42,7 @@ local GrabRig = require(ReplicatedStorage.Shared.Grab.GrabRig)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local VesselArmPose = require(ReplicatedStorage.Shared.Vessel.VesselArmPose)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("GrabHoldPose")
 
@@ -52,7 +53,7 @@ local POSE = GrabConstants.Pose
 local RENDER_STEP_NAME = "GrabHoldPose"
 -- Above Character (the animation step) for VesselArmPose's reason, and above GuardStrainPose's +2: a
 -- holding attacker whose guard is also cracking keeps the arm the victim hangs from where it is.
-local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 3
+local RENDER_PRIORITY = FrameOrder.Priority("GrabHoldPose")
 
 -- Only ApplyHand is used, so the station-grip half of the config is inert -- there is no station.
 local poser = VesselArmPose.New({

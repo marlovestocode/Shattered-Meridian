@@ -58,6 +58,7 @@ local AttackConstants = require(ReplicatedStorage.Shared.Attack.AttackConstants)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local BoatConstants = require(ReplicatedStorage.Shared.Boat.BoatConstants)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
+local ArchitectConstants = require(ReplicatedStorage.Shared.WorldArchitect.ArchitectConstants)
 local InventoryConstants = require(ReplicatedStorage.Shared.Inventory.InventoryConstants)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local DamageConstants = require(ReplicatedStorage.Shared.Damage.DamageConstants)
@@ -73,6 +74,7 @@ local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresen
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+local PlayerStateConstants = require(ReplicatedStorage.Shared.PlayerState.PlayerStateConstants)
 local RunConstants = require(ReplicatedStorage.Shared.Run.RunConstants)
 local TierConstants = require(ReplicatedStorage.Shared.TierConstants)
 local VehicleConstants = require(ReplicatedStorage.Shared.Vehicle.VehicleConstants)
@@ -132,6 +134,11 @@ local ENTRIES: { BootEntry } = {
 	},
 	{ Name = "VersionWatchSystem", Path = { "Systems", "VersionWatchSystem" }, Remotes = {} },
 	{ Name = "PlayerDataSystem", Path = { "Systems", "PlayerDataSystem" }, Remotes = {} },
+	{
+		Name = "PlayerStateSystem",
+		Path = { "Systems", "PlayerStateSystem" },
+		Remotes = namesOf(PlayerStateConstants.RemoteNames),
+	},
 	{
 		Name = "SettingsSystem",
 		Path = { "Systems", "SettingsSystem" },
@@ -273,6 +280,8 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Combat", "Environment", "EnvironmentReactionSystem" },
 		Remotes = namesOf(EnvironmentConstants.Network.RemoteNames),
 	},
+	-- Physical ragdolls, a sibling on OnApplied. No remote: the body itself replicates (server-owned while limp).
+	{ Name = "RagdollSystem", Path = { "Combat", "Ragdoll", "RagdollSystem" }, Remotes = {} },
 	-- The combat trace (Live Console, scope CombatTrace): a read-only sibling on the layers' signals. No remote:
 	-- its lines ride the Logger capture LiveConsoleSystem already streams.
 	{ Name = "CombatTrace", Path = { "Combat", "CombatTrace" }, Remotes = {} },
@@ -347,6 +356,12 @@ local ENTRIES: { BootEntry } = {
 		Path = { "Systems", "KitEditorSystem" },
 		Remotes = namesOf(Constants.KitEditor.RemoteNames),
 	},
+	-- The World Architect (admin world construction). Its remotes are all declared through Endpoint.
+	{
+		Name = "WorldArchitectSystem",
+		Path = { "Systems", "WorldArchitectSystem" },
+		Remotes = namesOf(ArchitectConstants.RemoteNames),
+	},
 	{
 		Name = "LiveConsoleSystem",
 		Path = { "Systems", "LiveConsoleSystem" },
@@ -408,8 +423,13 @@ end
 -- from it. Filled during Init; empty until a System boots.
 local declared: { [string]: string } = {}
 
--- Called by Endpoint when a System creates a remote through it. Idempotent for the same owner (a System may also still list the name
--- in its ENTRIES `Remotes` while it is being converted); a second OWNER is the ownership bug, and fails here at the moment it is made.
+-- Called by Endpoint when a System creates a remote through it. Idempotent for the same owner; a second OWNER is the ownership bug, and
+-- fails here at the moment it is made.
+--
+-- THE TWO HALVES ARE BOTH PERMANENT (decided 2026-10-26, W6). Every server remote is now created through Endpoint, so this half knows
+-- everything that WAS created. ENTRIES' `Remotes = namesOf(<Constants table>)` is the other half: every name a CLIENT may WaitForChild
+-- on. Only the comparison of the two catches a Constants name nobody creates -- the exact failure this file exists for (a client stalled
+-- in WaitForChild until timeout). Those lists are derived from the Constants table, never hand-typed, so they do not drift.
 function BootManifest.DeclareRemote(owner: string, remoteName: string): ()
 	local existing = declared[remoteName]
 	if existing ~= nil and existing ~= owner then

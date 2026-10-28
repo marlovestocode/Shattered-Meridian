@@ -98,6 +98,8 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Schema = require(ReplicatedStorage.Shared.Schema)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local logger = Logger.scope("RunSystem")
@@ -130,13 +132,9 @@ local REMOTE_NAMES = RunConstants.Network.RemoteNames
 -- reproduces under a spawn race.
 type LiveAttributes = {
 	-- Tiers 1-4 of the resolver: some other System has taken this character outright.
-	Frozen: boolean,
-	Flying: boolean,
-	EmoteMovementLocked: boolean,
-	Grabbed: boolean,
-	GrabThrowing: boolean,
-	Mounted: boolean,
-	SwingRooted: boolean,
+	-- BodyRestraint's "Move" row (Frozen, Flying, EmoteMovementLocked, Grabbed, GrabThrowing, Mounted, SwingRooted), asked
+	-- once per change to one of its Attributes rather than read seven times a tick.
+	MovementLocked: boolean,
 	-- A parkour action currently owns velocity, so this System writes nothing.
 	ParkourVelocityOwned: boolean,
 	-- Deadlines and states compared against `now` each tick -- the COMPARISON stays per-frame, only
@@ -164,13 +162,6 @@ type LiveAttributes = {
 -- Humanoid -- including SprintStage, which this System writes itself -- is filtered by a single table
 -- lookup, so this System's own writes cannot feed back into its own mirror.
 local MIRRORED_ATTRIBUTES: { [string]: true } = {
-	[ATTRIBUTES.Frozen] = true,
-	[ATTRIBUTES.Flying] = true,
-	[ATTRIBUTES.EmoteMovementLocked] = true,
-	[ATTRIBUTES.Grabbed] = true,
-	[ATTRIBUTES.GrabThrowing] = true,
-	[ATTRIBUTES.Mounted] = true,
-	[ATTRIBUTES.SwingRooted] = true,
 	[ATTRIBUTES.ParkourVelocityOwned] = true,
 	[ATTRIBUTES.CombatBusyUntil] = true,
 	[ATTRIBUTES.HitstunUntil] = true,
@@ -183,6 +174,9 @@ local MIRRORED_ATTRIBUTES: { [string]: true } = {
 	[ATTRIBUTES.DomainFlags] = true,
 	[ATTRIBUTES.DomainMoveSpeed] = true,
 }
+for _, attribute in BodyRestraint.AttributesOf("Move") do
+	MIRRORED_ATTRIBUTES[attribute] = true
+end
 
 type PlayerRunState = {
 	-- The player's held intent, as last reported. The only client-supplied value in this System.
@@ -221,7 +215,7 @@ type PlayerRunState = {
 	Live: LiveAttributes,
 }
 
-local playerStates: { [Player]: PlayerRunState } = {}
+local playerStates: { [Player]: PlayerRunState } = PlayerScoped.New("RunSystem.playerStates")
 
 local rateLimiter = RateLimiter.New(RunConstants.Network.MaxIntentPerSecondPerPlayer)
 
@@ -250,13 +244,7 @@ local function getState(player: Player): PlayerRunState
 		-- the authored default pair. resolveHumanoid refuses to step an unbound state anyway, but the
 		-- table is never allowed to be half-built.
 		Live = {
-			Frozen = false,
-			Flying = false,
-			EmoteMovementLocked = false,
-			Grabbed = false,
-			GrabThrowing = false,
-			Mounted = false,
-			SwingRooted = false,
+			MovementLocked = false,
 			ParkourVelocityOwned = false,
 			CombatBusyUntil = 0,
 			HitstunUntil = 0,
@@ -294,13 +282,7 @@ end
 -- Reads the mirror rather than the Humanoid -- see LiveAttributes. The five questions and their
 -- ordering are unchanged; only where the answers come from moved.
 local function readLiveAttributes(live: LiveAttributes, humanoid: Humanoid): ()
-	live.Frozen = humanoid:GetAttribute(ATTRIBUTES.Frozen) == true
-	live.Flying = humanoid:GetAttribute(ATTRIBUTES.Flying) == true
-	live.EmoteMovementLocked = humanoid:GetAttribute(ATTRIBUTES.EmoteMovementLocked) == true
-	live.Grabbed = humanoid:GetAttribute(ATTRIBUTES.Grabbed) == true
-	live.GrabThrowing = humanoid:GetAttribute(ATTRIBUTES.GrabThrowing) == true
-	live.Mounted = humanoid:GetAttribute(ATTRIBUTES.Mounted) == true
-	live.SwingRooted = humanoid:GetAttribute(ATTRIBUTES.SwingRooted) == true
+	live.MovementLocked = BodyRestraint.Restrained(humanoid, "Move")
 	live.ParkourVelocityOwned = humanoid:GetAttribute(ATTRIBUTES.ParkourVelocityOwned) == true
 	live.CombatBusyUntil = numberAttribute(humanoid, ATTRIBUTES.CombatBusyUntil, 0)
 	live.HitstunUntil = numberAttribute(humanoid, ATTRIBUTES.HitstunUntil, 0)
@@ -343,24 +325,12 @@ end
 -- Whether some other System has taken this character outright. Tiers 1-4 of the resolver, asked as one
 -- question because the answer is the same in every case: WalkSpeed is zero and the charge clock stops.
 local function isMovementLocked(live: LiveAttributes): boolean
-	return live.Frozen
-		or live.Flying
-		or live.EmoteMovementLocked
-		-- Grab layer (Server/Combat/Grab/GrabSystem.lua) -- true for the whole hold-then-flight
-		-- lifetime. Same "external system freezes movement without touching this System's own
-		-- resolver" shape as the three above; see AttributeConstants.Grabbed's own header for why
-		-- this is a separate Attribute from RootControlLocked rather than a widened meaning for it.
-		or live.Grabbed
-		-- The other end of a grab: a holder rooted for their throw clip. See AttributeConstants.GrabThrowing.
-		or live.GrabThrowing
-		-- Blimp layer (Server/Systems/BlimpSystem.lua) -- true for as long as this player is welded to a
-		-- station. Same shape as Grabbed immediately above; see AttributeConstants.Mounted's own header.
-		or live.Mounted
-		-- A move that Locks movement holds its attacker from the start of its Active window through its
-		-- recovery (HitboxEngine.setMovementLock). See AttributeConstants.SwingRooted.
-		or live.SwingRooted
+	-- Frozen, Flying, EmoteMovementLocked, Grabbed (a grab's whole hold-then-flight), GrabThrowing (the holder rooted for
+	-- the throw clip), Mounted (welded to a vehicle station) and SwingRooted (a Lock move's Active window through its
+	-- recovery): BodyRestraint's "Move" row, mirrored in readLiveAttributes. Each Attribute's own header says who sets it.
+	return live.MovementLocked
 		-- A realm's Rooted rule (Shared/Domain/DomainRules.lua) -- the same "an external system holds this
-		-- body where it is" tier, gated on the realm's lease.
+		-- body where it is" tier, gated on the realm's lease every tick, which is why it is not in the mirrored row.
 		or (live.DomainRooted and realmGoverns(live))
 end
 
@@ -684,8 +654,6 @@ function RunSystem.Init(): ()
 			if state then
 				state.CharacterTrove:Clean()
 			end
-			playerStates[player] = nil
-			rateLimiter:Clear(player)
 		end,
 		OnCharacter = function(player: Player, character: Model)
 			onCharacterAdded(player, character)

@@ -9,7 +9,7 @@
 -- them -- the thing being asserted is that the gate is WIRED IN, which is exactly the class of bug a
 -- unit test of the helper cannot see.
 --
--- Both gates exist because shift lock (Client/Camera/ShiftLockCamera.lua) decouples travel direction
+-- Both gates exist because shift lock (Client/Camera/CombatCamera.lua) decouples travel direction
 -- from facing: WASD is camera-relative with AutoRotate off, so a backpedal or a strafe moves the
 -- character into geometry they are not looking at. Every "backward" case below is therefore built the
 -- way shift lock actually produces it -- facing one way, travel/tangent another -- rather than by

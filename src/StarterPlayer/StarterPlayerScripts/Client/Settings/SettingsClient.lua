@@ -40,20 +40,14 @@ local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
 
 local SettingsModule = require(script.Parent.Parent.UI.Screens.Settings)
 local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
-local Analog = require(script.Parent.Parent.Input.Analog)
-local ParkourController = require(script.Parent.Parent.Parkour.ParkourController)
-local RunController = require(script.Parent.Parent.Movement.RunController)
-local CameraShake = require(script.Parent.Parent.FX.CameraShake)
-local FOVOffset = require(script.Parent.Parent.FX.FOVOffset)
-local BlimpCamera = require(script.Parent.Parent.Camera.BlimpCamera)
 local Chrome = require(script.Parent.Parent.UI.Shell.Chrome)
 local RemoteInvoker = require(script.Parent.Parent.Network.RemoteInvoker)
 local SettingsWriteCoalescer = require(script.Parent.SettingsWriteCoalescer)
+local SettingsStore = require(script.Parent.SettingsStore)
 
 type SettingsHandle = SettingsModule.SettingsHandle
 type ListeningState = { Device: Types.KeybindDevice, Action: Types.KeybindAction }
@@ -83,7 +77,7 @@ end, Constants.Settings.WriteCoalesceSeconds)
 
 -- Set by RestoreSettings and by the panel's own toggle, read back by Start to seed the screen, and
 -- pushed to Client/Movement/RunController.lua, which is what Autorun actually drives.
-local autorunEnabled = false
+local autorunEnabled: boolean = SettingsStore.Get("Autorun")
 
 -- The live Parkour preference block. Same role as autorunEnabled above -- set by RestoreSettings and
 -- by the panel's own controls, read back by Start to seed the screen. Each movement preference's
@@ -100,80 +94,44 @@ local autorunEnabled = false
 -- jumping kept working, because that is the stock Humanoid and never goes through this framework at
 -- all. A movement system that silently degrades to the fallback controller on a transient network
 -- error is exactly the "far more visible and confusing failure" that comment exists to rule out.
-local parkourSettings: Types.ParkourSettings = {
-	Enabled = ParkourConstants.Enabled,
-	CameraEffects = true,
-	CoyoteTime = ParkourConstants.Assists.CoyoteTime,
-	JumpBuffer = ParkourConstants.Assists.JumpBuffer,
-	AutoVault = ParkourConstants.Assists.AutoVault,
-	LedgeAssist = ParkourConstants.Assists.LedgeAssist,
-	StepAssist = ParkourConstants.Assists.StepAssist,
-	SprintMode = "Hold",
-}
+local parkourSettings: Types.ParkourSettings = SettingsStore.Get("Parkour")
 
 -- Pushes the whole current block to the modules that act on it. Called after any change rather than
 -- having each control call its own consumer, so there is one place the mapping from preference to
 -- consumer lives, and no way for a new preference to be persisted but never applied.
+-- Every effect of a Parkour setting is its consumer's own subscription (SettingsStore); this only publishes the block.
 local function applyParkourSettings(): ()
-	ParkourController.SetEnabled(parkourSettings.Enabled)
-	ParkourController.SetCameraEffectsEnabled(parkourSettings.CameraEffects)
-	ParkourController.SetAssists({
-		CoyoteTime = parkourSettings.CoyoteTime,
-		JumpBuffer = parkourSettings.JumpBuffer,
-		AutoVault = parkourSettings.AutoVault,
-		LedgeAssist = parkourSettings.LedgeAssist,
-		StepAssist = parkourSettings.StepAssist,
-	})
-	-- The one field in this block whose consumer is not ParkourController: hold-versus-toggle is a run
-	-- concern, and Client/Movement/RunController.lua owns the run's key. Pushed from here anyway rather
-	-- than from the SprintModeChanged handler alone, so this function keeps its documented property of
-	-- being the single place a preference is mapped to a consumer -- a preference that is persisted but
-	-- never applied is the failure this function exists to make impossible.
-	RunController.SetSprintMode(parkourSettings.SprintMode)
+	SettingsStore.Set("Parkour", parkourSettings)
 end
 
 -- The live camera-comfort block. Same role as parkourSettings above -- set by RestoreSettings and by
 -- the panel's own controls, read back by Start to seed the screen. Seeded to the shipped defaults
 -- (both effects on) so a failed settings fetch runs the game everyone else sees rather than silently
 -- stripping effects; see RestoreSettings' own fallback for the identical reasoning applied to parkour.
-local comfortSettings: Types.ComfortSettings = {
-	CameraShake = true,
-	FieldOfViewEffects = true,
-	VehicleCameraMotion = true,
-}
+local comfortSettings: Types.ComfortSettings = SettingsStore.Get("Comfort")
 
 -- Sibling to applyParkourSettings above, with the same contract: the single place a comfort preference
 -- is mapped to its consumer, so a preference cannot be persisted but never applied.
 local function applyComfortSettings(): ()
-	CameraShake.SetEnabled(comfortSettings.CameraShake)
-	FOVOffset.SetPunchesEnabled(comfortSettings.FieldOfViewEffects)
-	BlimpCamera.SetMotionEnabled(comfortSettings.VehicleCameraMotion)
+	SettingsStore.Set("Comfort", comfortSettings)
 end
 
 -- The live gamepad stick block. Same role as parkourSettings/comfortSettings above. Seeded from
 -- Constants.Settings.Gamepad.Defaults rather than from literals so this module does not become a
 -- fourth opinion about what the shipped values are -- Analog.lua and Server/Systems/PlayerDataSystem.lua
 -- both read that same table.
-local gamepadSettings: Types.GamepadSettings = {
-	LookSensitivity = Constants.Settings.Gamepad.Defaults.LookSensitivity,
-	MoveDeadzone = Constants.Settings.Gamepad.Defaults.MoveDeadzone,
-	LookDeadzone = Constants.Settings.Gamepad.Defaults.LookDeadzone,
-	InvertLookY = Constants.Settings.Gamepad.Defaults.InvertLookY,
-	Vibration = Constants.Settings.Gamepad.Defaults.Vibration,
-}
+local gamepadSettings: Types.GamepadSettings = SettingsStore.Get("Gamepad")
 
 -- Sibling to applyComfortSettings above, with the same contract. One consumer today, and the whole
 -- block goes to it in one call rather than field by field -- Analog.lua derives the left stick's and
 -- right stick's configs from it differently (see its header), so handing it the table is what lets
 -- that split live in one place instead of being re-decided here.
 local function applyGamepadSettings(): ()
-	Analog.SetSettings(gamepadSettings)
+	SettingsStore.Set("Gamepad", gamepadSettings)
 end
 
 -- The live interface-preferences block. Same role as comfortSettings/gamepadSettings above.
-local uiSettings: Types.UISettings = {
-	Scale = Constants.Settings.UI.Defaults.Scale,
-}
+local uiSettings: Types.UISettings = SettingsStore.Get("UI")
 
 -- Unlike every other applier above, this one has no fixed consumer module to call into -- the thing it
 -- drives (the single ViewportScale multiplier UI/init.lua composes every surface's UIScale from) lives
@@ -184,6 +142,7 @@ local uiSettings: Types.UISettings = {
 -- UI.Mount() call that RestoreSettings' caller already sequences after).
 local setUIScale: ((number) -> ())? = nil
 local function applyUISettings(): ()
+	SettingsStore.Set("UI", uiSettings)
 	if setUIScale then
 		setUIScale(uiSettings.Scale)
 	end
@@ -193,7 +152,7 @@ end
 -- Autorun lives on Types.PlayerSettings directly rather than in the nested Parkour block -- see that
 -- type's own note on why it is flat.
 local function applyAutorun(): ()
-	RunController.SetAutorun(autorunEnabled)
+	SettingsStore.Set("Autorun", autorunEnabled)
 end
 
 -- Applies every persisted keybind override onto KeybindManager and primes the Autorun loop -- see

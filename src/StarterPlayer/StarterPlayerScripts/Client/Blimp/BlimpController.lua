@@ -40,8 +40,8 @@
 	THE POSE RUNS ON BindToRenderStep AT Character + 1, not on Heartbeat, and that priority is load-
 	bearing: the character/animation update runs at Enum.RenderPriority.Character, so anything earlier
 	is simply overwritten by the idle clip on the same frame and the body flickers between two poses.
-	It also runs AFTER the camera's own Camera + 1 pass, which is what makes the telemetry this file
-	hands the helm panel the same frame's numbers the view was drawn from.
+	It also runs AFTER BlimpCamera's own step (which samples the hull before the camera moves), which is what
+	makes the telemetry this file hands the helm panel the same frame's numbers the view was drawn from.
 
 	THE HELM CONTROLS ARE CONTEXTUAL, deliberately, and are the one place this module does not go
 	through KeybindManager. A/D and Space/LeftShift are the movement keys the player already has their
@@ -109,6 +109,7 @@ local BlimpFuelModule = require(script.Parent.Parent.UI.Screens.BlimpFuel)
 local BlimpHelmModule = require(script.Parent.Parent.UI.Screens.BlimpHelm)
 local CarriedResourcesModule = require(script.Parent.Parent.UI.Screens.CarriedResources)
 local Notify = require(script.Parent.Parent.UI.Shell.Notify)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("BlimpController")
 
@@ -430,7 +431,7 @@ local function refreshPoseBinding(): ()
 	if wanted then
 		-- Character + 1, not Heartbeat -- see this file's header. This is the whole reason the pose
 		-- survives a playing idle animation instead of fighting it.
-		RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Character.Value + 1, applyPoses)
+		RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("BlimpPose"), applyPoses)
 	else
 		RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	end
@@ -766,31 +767,6 @@ local function pumpTelegraphHold(deltaTime: number): ()
 	sendSpeedShift(telegraphHeld)
 end
 
--- Whether `input` is the press that reaches `binding` on EITHER device -- the contextual counterpart
--- of KeybindManager.Matches, and the only thing in this file that knows a control has two columns.
---
--- BOTH COLUMNS ARE CHECKED UNCONDITIONALLY, with no read of which device is "current". That is the
--- same reasoning readHelmAxes sums rather than branches: an InputObject already carries which physical
--- input it was, so a device check here could only ever disagree with the press in hand -- and
--- Client/Input/InputDevice.lua's own hysteresis means it CAN disagree, for one press, right after a
--- player picks a controller up. The keyboard and gamepad columns hold disjoint KeyCodes, so checking
--- both is not ambiguous, merely thorough.
-local function matchesControl(binding: BlimpTypes.HelmPressBinding, input: InputObject): boolean
-	if input.KeyCode == binding.Gamepad then
-		return true
-	end
-	local keyboard = binding.Keyboard
-	if keyboard then
-		return input.KeyCode == keyboard
-	end
-	-- The Release row, whose keyboard half is the live Interact bind rather than a fixed key. Matches
-	-- checks BOTH of KeybindManager's maps, which is harmless here and not relied on: Interact has no
-	-- plain gamepad binding at all (it is on the chord layer), so the gamepad answer for this row is
-	-- the explicit ButtonX above and nothing else.
-	local action = binding.Action
-	return action ~= nil and KeybindManager.Matches(action, input)
-end
-
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	-- BUTTONA IS EXEMPTED FROM THE gameProcessed GATE, and this is a Roblox engine quirk, not a
 	-- BlimpConstants reasoning error. BlimpConstants.Controls' header argues ButtonA is safe to spend
@@ -812,7 +788,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		return
 	end
 
-	if matchesControl(BlimpConstants.Controls.Release, input) then
+	if KeybindManager.MatchesHelmControl(BlimpConstants.Controls.Release, input) then
 		local remote = dismountRemote
 		if not remote then
 			logger:warn("Release pressed before the dismount remote was ready")
@@ -828,11 +804,11 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		return
 	end
 
-	if matchesControl(BlimpConstants.Controls.ThrottleUp, input) then
+	if KeybindManager.MatchesHelmControl(BlimpConstants.Controls.ThrottleUp, input) then
 		beginTelegraphHold(1)
-	elseif matchesControl(BlimpConstants.Controls.ThrottleDown, input) then
+	elseif KeybindManager.MatchesHelmControl(BlimpConstants.Controls.ThrottleDown, input) then
 		beginTelegraphHold(-1)
-	elseif matchesControl(BlimpConstants.Controls.AllStop, input) then
+	elseif KeybindManager.MatchesHelmControl(BlimpConstants.Controls.AllStop, input) then
 		-- The panic key. Rings the telegraph straight down to All Stop from wherever it was, rather
 		-- than making a pilot tap S past four rungs while the ship carries on toward whatever they
 		-- just noticed.
@@ -842,7 +818,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		-- they just slammed shut.
 		telegraphHeld = 0
 		sendSpeedShift(0)
-	elseif matchesControl(BlimpConstants.Controls.Autopilot, input) then
+	elseif KeybindManager.MatchesHelmControl(BlimpConstants.Controls.Autopilot, input) then
 		local remote = toggleAutopilotRemote
 		if remote then
 			remote:FireServer()
@@ -860,8 +836,8 @@ local function onInputEnded(input: InputObject, _gameProcessed: boolean): ()
 	if telegraphHeld == 0 then
 		return
 	end
-	local up = telegraphHeld > 0 and matchesControl(BlimpConstants.Controls.ThrottleUp, input)
-	local down = telegraphHeld < 0 and matchesControl(BlimpConstants.Controls.ThrottleDown, input)
+	local up = telegraphHeld > 0 and KeybindManager.MatchesHelmControl(BlimpConstants.Controls.ThrottleUp, input)
+	local down = telegraphHeld < 0 and KeybindManager.MatchesHelmControl(BlimpConstants.Controls.ThrottleDown, input)
 	if up or down then
 		telegraphHeld = 0
 	end

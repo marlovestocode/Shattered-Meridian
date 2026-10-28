@@ -225,27 +225,6 @@ function BlimpDrive.Step(
 	}
 end
 
--- Bounds how far `target` may lead `actualPosition`, clamping only the DISTANCE between them along the
--- straight line that already separates them -- the direction and `target`'s own rotation are untouched.
--- See this file's header for why this is the one place that reads a real position at all and why that
--- does not compromise the rest of the module's purity contract.
---
--- Returns `target` UNCHANGED (the same value, not an equal copy) when it is already within the bound,
--- which is every tick of a clean flight path -- the caller relies on that to know whether it needs to
--- write anything back into Drive at all.
-function BlimpDrive.ClampLead(target: CFrame, actualPosition: Vector3, maxLeadStuds: number): CFrame
-	local offset = target.Position - actualPosition
-	local distance = offset.Magnitude
-	if distance <= maxLeadStuds then
-		return target
-	end
-	-- distance > maxLeadStuds >= 0 here, so `offset` cannot be the zero vector and dividing by `distance`
-	-- is safe. `target.Rotation` is target's own rotation about the origin -- adding the clamped position
-	-- back onto it keeps the yaw ClampLead was handed and touches nothing else about the pose.
-	local clampedPosition = actualPosition + (offset / distance) * maxLeadStuds
-	return target.Rotation + clampedPosition
-end
-
 -- What the orientation constraint is actually given: the upright target plus the bank the current turn
 -- rate earns. Derived, never stored -- see this file's header and BlimpTypes.DriveState.
 --

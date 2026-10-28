@@ -30,8 +30,14 @@
 	remote -- all of those Systems replicate a real starting value the moment a profile loads (see
 	each System's own OnProfileLoaded handler), so the render-only defaults below are only ever
 	visible for the brief window before that first update arrives, the same "full bar looks correct
-	before real data arrives" contract Health/Posture already established. QiDeviationSystem/
-	ArtSystem/etc. remain empty Init()s, so this file has nothing else to wire yet.
+	before real data arrives" contract Health/Posture already established.
+
+	EVERY PLAYER-STATE SLICE IS CACHED HERE, AND REPLAYED ONCE (coworking plan F4, W7-W8). Bootstrap listens to every remote a
+	server System uses for this player's OWN state (SLICE_REMOTES below) and keeps each one's last payload. A consumer that is
+	not a Fusion Value above -- the character menu's sheet, the inventory, the weapon dock -- calls ClientState.Observe(remote,
+	fn): it is handed the cached payload at once and every later one, so it needs no pull RemoteFunction of its own and cannot
+	miss a push that landed before it started. Once every listener is connected, Bootstrap fires PlayerState_Replay and each
+	owning System re-sends its slice (Server/Systems/PlayerStateSystem.lua) -- state only, never a gain or promotion event.
 
 	Second accepted pattern -- the Screen-returned handle: not every piece of server-reflected state
 	belongs here. When a value has exactly one consumer and that consumer is a single Screen, routing
@@ -60,6 +66,11 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local SlowWatch = require(ReplicatedStorage.Shared.SlowWatch)
 local Trove = require(ReplicatedStorage.Shared.Trove)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
+local ArtConstants = require(ReplicatedStorage.Shared.ArtConstants)
+local InventoryConstants = require(ReplicatedStorage.Shared.Inventory.InventoryConstants)
+local PlayerStateConstants = require(ReplicatedStorage.Shared.PlayerState.PlayerStateConstants)
+local WeaponConstants = require(ReplicatedStorage.Shared.Combat.WeaponConstants)
 
 local logger = Logger.scope("ClientState")
 
@@ -147,6 +158,63 @@ export type ClientState = {
 }
 
 local ClientState = {}
+
+-- Every remote a server System uses to send this player their OWN state (PlayerStateSystem's registered slices). Events --
+-- hits, cues, realm messages -- are never here.
+local SLICE_REMOTES: { string } = {
+	Constants.Qi.RemoteNames.QiUpdated,
+	Constants.Meridian.RemoteNames.XPUpdated,
+	TierConstants.RemoteNames.TierUpdated,
+	EmoteConstants.RemoteNames.UnlockedUpdated,
+	EmoteConstants.RemoteNames.LoadoutUpdated,
+	BountyConstants.RemoteNames.MarkedChanged,
+	EngagementConstants.Network.RemoteNames.Changed,
+	Constants.CharacterSheet.RemoteNames.SheetUpdated,
+	ArtConstants.RemoteNames.ArtStateUpdated,
+	InventoryConstants.RemoteNames.Snapshot,
+	WeaponConstants.Network.RemoteNames.InventoryChanged,
+	-- The one shared slice: the bounty board everyone sees (a broadcast), cached so the bounty tab needs no pull of its own.
+	BountyConstants.RemoteNames.BoardUpdated,
+}
+ClientState.SliceRemotes = table.freeze(table.clone(SLICE_REMOTES))
+
+-- The last payload each slice remote delivered, and who is listening. Module-level, not per-state: there is one local player.
+local lastPayload: { [string]: any } = {}
+local observers: { [string]: CallbackList.CallbackList<any> } = {}
+local tracked: { [string]: boolean } = {}
+
+local function track(remoteName: string): ()
+	if tracked[remoteName] then
+		return
+	end
+	tracked[remoteName] = true
+	observers[remoteName] = observers[remoteName] or CallbackList.New(logger, `ClientState.Observe({remoteName})`)
+	NetworkBridge.GetRemoteEvent(remoteName).OnClientEvent:Connect(function(payload: unknown)
+		lastPayload[remoteName] = payload
+		observers[remoteName]:Fire(payload)
+	end)
+end
+
+-- Hands `callback` the slice's cached payload now (if one has arrived) and every later one. Returns the disconnect. The payload is
+-- the raw wire value: validate it at this boundary, as every handler in Bootstrap does.
+function ClientState.Observe(remoteName: string, callback: (payload: any) -> ()): () -> ()
+	assert(
+		table.find(SLICE_REMOTES, remoteName) ~= nil,
+		`ClientState.Observe("{remoteName}"): not a player-state slice`
+	)
+	track(remoteName)
+	local disconnect = observers[remoteName]:Connect(callback)
+	local cached = lastPayload[remoteName]
+	if cached ~= nil then
+		task.spawn(callback, cached)
+	end
+	return disconnect
+end
+
+-- The slice's last payload, or nil before one has arrived.
+function ClientState.Latest(remoteName: string): any
+	return lastPayload[remoteName]
+end
 
 function ClientState.new(scope: Scope): ClientState
 	return {
@@ -436,6 +504,14 @@ function ClientState.Bootstrap(state: ClientState): ()
 		state.Engagement:set(engagement)
 		state.InCombat:set(engagement.InCombat)
 	end)
+
+	-- Every slice cached from here on, then one request for all of them: a push sent before these listeners existed (the
+	-- profile loaded while the client was still booting) is re-sent now. See this file's header.
+	for _, remoteName in SLICE_REMOTES do
+		track(remoteName)
+	end
+	NetworkBridge.GetRemoteEvent(PlayerStateConstants.RemoteNames.Replay):FireServer()
+	logger:debug("Player-state replay requested", { slices = #SLICE_REMOTES })
 end
 
 return ClientState

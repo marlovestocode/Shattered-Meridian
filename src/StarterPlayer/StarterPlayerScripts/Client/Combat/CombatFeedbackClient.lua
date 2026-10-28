@@ -242,15 +242,24 @@ local FREEZE_SECONDS_BY_KIND: { [string]: number } = {
 -- lookup, because an attacker's own client also receives this same Combat_Feedback event (with
 -- Role == "Attacker") for the hit it just landed, and an attacker freezing their own movement on a
 -- swing that connected would read as the game stuttering on a successful hit rather than as feedback.
-local function freezeVictimFor(payload: CombatFeedback): ()
-	if payload.Role ~= "Defender" then
+--
+-- A RAGDOLLED defender is skipped: the server holds that body (Server/Combat/Ragdoll/RagdollSystem), and a
+-- freeze written on it would be refused anyway.
+local function freezeVictimFor(payload: CombatFeedback, ageSeconds: number?): ()
+	if payload.Role ~= "Defender" or payload.Ragdolled == true then
 		return
 	end
 	local seconds = FREEZE_SECONDS_BY_KIND[payload.Kind]
 	if not seconds then
 		return
 	end
-	HitStop.FreezeVictimMovement(seconds)
+	HitStop.FreezeVictimMovement(seconds, ageSeconds)
+end
+
+-- How long ago a SERVER verdict's contact happened, by the time it reached this client: its one-way trip.
+-- What HitStop ages a verdict's freeze by (FXConstants.HitStop.AgeByLatency). A predicted impact has none.
+local function verdictAge(): number
+	return PingReading.OneWay(Players.LocalPlayer:GetNetworkPing())
 end
 
 -- Victim-only, same shape and same gate as freezeVictimFor directly above -- see this file's header
@@ -273,7 +282,7 @@ local EXCHANGE_SECONDS_BY_KIND: { [string]: number } = {
 	Trade = FXConstants.HitStop.ParrySeconds,
 }
 
-local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): boolean
+local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?, ageSeconds: number?): boolean
 	local seconds = EXCHANGE_SECONDS_BY_KIND[payload.Kind]
 	if seconds then
 		if variantOf(payload) == "ParriedPerfect" then
@@ -293,32 +302,36 @@ local function freezeExchangeFor(payload: CombatFeedback, cue: Cue?): boolean
 	if not resolved or resolved <= 0 then
 		return false
 	end
-	return HitStop.FreezeExchange(payload.Attacker, payload.Defender, resolved)
+	return HitStop.FreezeExchange(payload.Attacker, payload.Defender, resolved, ageSeconds)
 end
 
 -- Victim-only, like the freeze above, and deliberately sequenced AFTER it: the launch the server put on
 -- this Defender copy starts once the freeze this same event just began has run out, because the freeze
 -- writes zero velocity every frame it holds and would erase a launch written any earlier. See
 -- KnockbackClient.lua's header for the shape of the launch itself.
+--
+-- WAITS OUT THE FREEZE THAT IS ACTUALLY RUNNING (HitStop.VictimFreezeRemaining), not the outcome's table
+-- length: a freeze the chain dropped, capped or aged used to leave the launch waiting anyway -- the body
+-- neither frozen nor flying, which read as the controls sticking for a beat after the hit-stop was over.
 local function launchFor(payload: CombatFeedback): ()
 	if payload.Role ~= "Defender" or typeof(payload.Knockback) ~= "Vector3" then
 		return
 	end
-	KnockbackClient.Launch(payload.Knockback :: Vector3, FREEZE_SECONDS_BY_KIND[payload.Kind] or 0)
+	KnockbackClient.Launch(payload.Knockback :: Vector3, HitStop.VictimFreezeRemaining())
 end
 
 -- The spacing push (DamageConstants.Spacing), on EITHER role: the defender sliding back, the attacker
 -- following a hit or rebounding off a block. Started after this client's freeze for the same reason as
--- the launch above -- the victim's movement freeze, or the exchange's pose freeze for the attacker.
-local function pushFor(payload: CombatFeedback, cue: Cue?): ()
+-- the launch above -- the victim's movement freeze, or the exchange's pose freeze for the attacker -- and,
+-- like it, after the freeze that is really running.
+local function pushFor(payload: CombatFeedback): ()
 	if typeof(payload.Push) ~= "Vector3" or typeof(payload.Knockback) == "Vector3" then
 		return
 	end
-	-- The attacker's push waits out the exchange freeze -- the move's own, when it authored one.
 	-- A trade is even, so both sides wait out the same clash freeze before they part.
 	local delay = if payload.Role == "Defender" and payload.Kind ~= "Trade"
-		then FREEZE_SECONDS_BY_KIND[payload.Kind] or 0
-		else MovePresentation.HitStopSeconds(cue, EXCHANGE_SECONDS_BY_KIND[payload.Kind]) or 0
+		then HitStop.VictimFreezeRemaining()
+		else HitStop.ExchangeRemaining()
 	KnockbackClient.Push(payload.Push :: Vector3, delay)
 end
 
@@ -459,7 +472,9 @@ end
 -- whether the exchange freeze started, which the prediction's record keeps.
 type SkipBeats = { Audio: boolean?, Freeze: boolean? }
 
-local function presentHit(payload: CombatFeedback, cue: Cue?, skip: SkipBeats?): boolean
+-- `ageSeconds`: how long ago the contact happened (verdictAge for a server verdict, nil for a prediction or a
+-- preview), which the exchange freeze is shortened by.
+local function presentHit(payload: CombatFeedback, cue: Cue?, skip: SkipBeats?, ageSeconds: number?): boolean
 	timed("Hit.Shake", function()
 		shakeFor(payload, cue)
 	end)
@@ -515,7 +530,7 @@ local function presentHit(payload: CombatFeedback, cue: Cue?, skip: SkipBeats?):
 	local froze = false
 	timed("Hit.FreezeExchange", function()
 		if not (skip and skip.Freeze) then
-			froze = freezeExchangeFor(payload, cue)
+			froze = freezeExchangeFor(payload, cue, ageSeconds)
 		end
 	end)
 	return froze
@@ -688,13 +703,14 @@ local function onFeedback(raw: unknown): ()
 	debug.profilebegin("CombatFeedback")
 	local cue = CombatFeedbackClient.CueFor(payload)
 	local mode, record = consumePrediction(payload)
+	local age = verdictAge()
 	if mode == "Delta" then
-		presentHit(payload, cue, { Audio = true, Freeze = true })
+		presentHit(payload, cue, { Audio = true, Freeze = true }, age)
 	elseif mode ~= "Skip" then
 		if mode == "Reversal" then
 			retractPrediction(payload, record)
 		end
-		presentHit(payload, cue)
+		presentHit(payload, cue, nil, age)
 	end
 	-- The air combo's weight on top of the ordinary hit presentation: a camera punch per air hit, the
 	-- finisher hardest, and the air parry's own clash (docs/design/air-combat-and-evade.md B4).
@@ -704,11 +720,11 @@ local function onFeedback(raw: unknown): ()
 		end)
 	end
 	timed("Hit.FreezeVictim", function()
-		freezeVictimFor(payload)
+		freezeVictimFor(payload, age)
 	end)
 	timed("Hit.Knockback", function()
 		launchFor(payload)
-		pushFor(payload, cue)
+		pushFor(payload)
 	end)
 	timed("Hit.CancelSwing", function()
 		cancelSwingFor(payload)

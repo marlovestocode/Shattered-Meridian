@@ -18,6 +18,7 @@ local BoatConstants = require(ReplicatedStorage.Shared.Boat.BoatConstants)
 local BoatTypes = require(ReplicatedStorage.Shared.Boat.BoatTypes)
 local BoatWind = require(ReplicatedStorage.Shared.Boat.BoatWind)
 local BoatDrive = require(ServerScriptService.Server.Boat.BoatDrive)
+local VesselDriveMath = require(ServerScriptService.Server.Vessel.VesselDriveMath)
 
 -- A hull whose root happens to face the way the artist drew her, so ForwardYawRadians is 0 and the
 -- bearing arithmetic in the assertions stays readable. The one test that cares about a mis-oriented root
@@ -361,12 +362,12 @@ return function()
 	describe("ClampLead", function()
 		it("leaves a target that is already close enough exactly alone", function()
 			local target = CFrame.new(10, 0, 0)
-			expect(BoatDrive.ClampLead(target, Vector3.new(9, 0, 0), 60)).to.equal(target)
+			expect(VesselDriveMath.ClampLead(target, Vector3.new(9, 0, 0), 60)).to.equal(target)
 		end)
 
 		it("pulls a runaway target back onto the same line without rotating it", function()
 			local target = CFrame.new(500, 0, 0) * CFrame.Angles(0, 1.2, 0)
-			local clamped = BoatDrive.ClampLead(target, Vector3.zero, 60)
+			local clamped = VesselDriveMath.ClampLead(target, Vector3.zero, 60)
 			expect(clamped.Position.Magnitude).to.be.near(60, 1e-4)
 			expect(clamped.LookVector:Dot(target.LookVector)).to.be.near(1, 1e-6)
 		end)

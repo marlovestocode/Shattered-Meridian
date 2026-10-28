@@ -50,7 +50,6 @@
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local UserInputService = game:GetService("UserInputService")
 
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
@@ -64,6 +63,8 @@ local InputDevice = require(script.Parent.Parent.Input.InputDevice)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
 local JumpGate = require(script.Parent.Parent.Movement.JumpGate)
 local Layers = require(script.Parent.Parent.UI.Shell.Layers)
+local TurnGate = require(script.Parent.Parent.Movement.TurnGate)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 
 local logger = Logger.scope("GrabInputClient")
 
@@ -158,24 +159,6 @@ end
 -- gameProcessedEvent only covers clicks that LAND on the GUI, and a centred 760x620 panel leaves
 -- most of the viewport uncovered, so a player reading their character sheet was still throwing a
 -- punch every time they clicked anywhere else on screen.
-local function isModalUiOpen(): boolean
-	local player = Players.LocalPlayer
-	return player ~= nil and player:GetAttribute(AttributeConstants.UiModalOpen) == true
-end
-
-local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
-	if gameProcessed then
-		return
-	end
-	-- Same gate AttackInputClient holds, for the same reason -- see isModalUiOpen above. A throw is
-	-- an attack as far as a player clicking inside their own menu is concerned.
-	if isModalUiOpen() then
-		return
-	end
-	if KeybindManager.Matches("GrabThrow", input) then
-		requestThrow()
-	end
-end
 
 -- Presentation ---------------------------------------------------------------------------------------
 
@@ -205,24 +188,11 @@ end
 -- The client half of rooting a thrower for their throw clip (AttributeConstants.GrabThrowing, written
 -- by GrabSystem). The server pins WalkSpeed and parks parkour and shift lock's yaw; what only the client
 -- that simulates this body can stop is the engine's own jump and its turn-to-face-movement. Jump is a
--- Client/Movement/JumpGate claim, beside the launcher window's and a locked swing's; AutoRotate is captured
--- and put back only if nothing else changed it meanwhile, SwingTracking's rule.
-local restoreAutoRotate: boolean? = nil
-
+-- Client/Movement/JumpGate claim, beside the launcher window's and a locked swing's; AutoRotate is a
+-- Client/Movement/TurnGate claim, beside the throw swing's own and shift lock's.
 local function setThrowRooted(humanoid: Humanoid, rooted: boolean): ()
-	if rooted then
-		if restoreAutoRotate == nil then
-			restoreAutoRotate = humanoid.AutoRotate
-		end
-		humanoid.AutoRotate = false
-		JumpGate.Set(humanoid, JumpGate.Owners.GrabThrow, true)
-		return
-	end
-	if restoreAutoRotate == true and humanoid.AutoRotate == false then
-		humanoid.AutoRotate = true
-	end
-	restoreAutoRotate = nil
-	JumpGate.Set(humanoid, JumpGate.Owners.GrabThrow, false)
+	TurnGate.Set(humanoid, TurnGate.Owners.GrabThrow, rooted)
+	JumpGate.Set(humanoid, JumpGate.Owners.GrabThrow, rooted)
 end
 
 -- Lifecycle ------------------------------------------------------------------------------------------
@@ -238,7 +208,14 @@ function GrabInputClient.Start(): ()
 	local holdChangedRemote = NetworkBridge.GetRemoteEvent(GrabConstants.Network.RemoteNames.HoldChanged)
 	holdChangedRemote.OnClientEvent:Connect(onHoldChanged)
 
-	UserInputService.InputBegan:Connect(onInputBegan)
+	-- The router's Gameplay layer is exactly the gate this used to write out: never on a keystroke a text box consumed, and
+	-- never while a modal panel is open (a throw is an attack as far as a click inside a menu is concerned).
+	InputRouter.Bind("GrabThrow", {
+		Layer = "Gameplay",
+		Began = function()
+			requestThrow()
+		end,
+	})
 
 	-- The Humanoid wait, the boot-thread task.spawn and the no-Humanoid warning all live in
 	-- Shared/PlayerLifecycle.lua now -- this module's own comment about all three used to be one of
@@ -250,8 +227,6 @@ function GrabInputClient.Start(): ()
 			-- A new life is never mid-hold -- GrabSystem's own Players.PlayerRemoving/Step sweeps
 			-- already cleared any hold this player was part of when the previous character ended.
 			setCue(nil)
-			-- A fresh Humanoid starts with its own defaults, so nothing from the last life is restored.
-			restoreAutoRotate = nil
 			local throwing = AttributeConstants.GrabThrowing
 			life:Connect(humanoid:GetAttributeChangedSignal(throwing), function()
 				setThrowRooted(humanoid, humanoid:GetAttribute(throwing) == true)

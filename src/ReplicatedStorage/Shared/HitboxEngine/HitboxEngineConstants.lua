@@ -218,6 +218,10 @@ HitboxEngineConstants.Projectile = {
 	-- beside the body that threw it, and without the grace every such shot would hit its thrower on the
 	-- first step. A shot a parry handed to someone else has a new owner and needs none.
 	OwnerHitGraceSeconds = 0.25,
+
+	-- A returning shot (ProjectileTypes.ReturnAfterSeconds) ends "Returned" once its step passes this close
+	-- to its thrower's root -- a catch radius, so a fast shot cannot overshoot the hand it is flying to.
+	ReturnCatchStuds = 3,
 }
 
 -- Integration ------------------------------------------------------------------------------------

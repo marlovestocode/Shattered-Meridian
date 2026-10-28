@@ -40,6 +40,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local TransformLayer = require(script.Parent.TransformLayer)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("GuardStrainPose")
 
@@ -50,16 +51,9 @@ local TAG = DefenseConstants.GuardCrack.Tag
 local RENDER_STEP_NAME = "GuardStrainPose"
 -- Above Character, so the animation step has already written this frame's Transforms -- see
 -- VesselArmPose's own TIMING IS NOT NEGOTIABLE note.
-local RENDER_PRIORITY = Enum.RenderPriority.Character.Value + 2
+local RENDER_PRIORITY = FrameOrder.Priority("GuardStrainPose")
 
 -- R6 joint name -> the Part that holds it. THIS IS AN R6 GAME (memory: the game is R6-locked).
-local JOINTS: { { Name: string, Holder: string } } = {
-	{ Name = "RootJoint", Holder = "HumanoidRootPart" },
-	{ Name = "Neck", Holder = "Torso" },
-	{ Name = "Right Shoulder", Holder = "Torso" },
-	{ Name = "Left Shoulder", Holder = "Torso" },
-}
-
 -- Per-joint noise offsets so the four joints do not tremble in lockstep (one diagonal jerk).
 local NOISE_SEEDS: { [string]: number } = {
 	RootJoint = 3.1,
@@ -122,22 +116,6 @@ end
 
 -- Joints ---------------------------------------------------------------------------------------------
 
-local function resolveJoints(humanoid: Humanoid): { Motor6D }?
-	local model = humanoid.Parent
-	if model == nil then
-		return nil
-	end
-	local joints: { Motor6D } = {}
-	for _, spec in JOINTS do
-		local holder = model:FindFirstChild(spec.Holder)
-		local motor = if holder then holder:FindFirstChild(spec.Name) else nil
-		if motor and motor:IsA("Motor6D") then
-			table.insert(joints, motor)
-		end
-	end
-	return if #joints > 0 then joints else nil
-end
-
 -- Takes this layer off every joint -- see TransformLayer.Restore.
 local function restore(entry: Entry): ()
 	local joints = entry.Joints
@@ -153,7 +131,7 @@ end
 local function applyPose(entry: Entry, t: number): ()
 	local joints = entry.Joints
 	if not joints then
-		joints = resolveJoints(entry.Humanoid)
+		joints = TransformLayer.ResolveBodyJoints(entry.Humanoid)
 		entry.Joints = joints
 		if not joints then
 			return

@@ -84,6 +84,7 @@ local Systems = ServerScriptService.Server.Systems
 local PlayerDataSystem = require(Systems.PlayerDataSystem)
 local AdminActionSystem = require(Systems.AdminActionSystem)
 local Schema = require(ReplicatedStorage.Shared.Schema)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 local CharacterCreationSystem = {}
@@ -278,7 +279,7 @@ end
 -- call Player:LoadCharacter() again and destroy/replace an already-spawned (possibly mid-chargen,
 -- frozen) character. Never trust a RemoteFunction to be called exactly once just because the normal
 -- client only calls it once.
-local spawnedThisSession: { [Player]: boolean } = {}
+local spawnedThisSession: { [Player]: boolean } = PlayerScoped.New("CharacterCreationSystem.spawnedThisSession")
 
 -- Closes the double-Finalize race docs/architecture/2026-08-audit.md section 3.3 flagged: the
 -- "already onboarded" check below reads profile.raceId before the yielding
@@ -288,14 +289,15 @@ local spawnedThisSession: { [Player]: boolean } = {}
 -- first. Set/checked synchronously (no yield between the AlreadyOnboarded read and this flag) so a
 -- concurrent second call is rejected here, before it ever reaches validation or the yield -- same
 -- eager-flag-before-yield shape as BugReportSystem.Submit's lastSubmitAt guard.
-local finalizingPlayers: { [Player]: boolean } = {}
+local finalizingPlayers: { [Player]: boolean } = PlayerScoped.New("CharacterCreationSystem.finalizingPlayers")
 
 -- True from the moment Finalize grants isolation-through-awakening (right after a successful
 -- PivotTo) until a validated CharacterCreation_AwakeningComplete clears it -- what makes
 -- handleAwakeningComplete below "a client can only ever end its own isolation, and only once
 -- Finalize actually granted it" rather than trusting the remote's mere existence. Same small
 -- table-guard shape as finalizingPlayers/spawnedThisSession above.
-local awaitingAwakeningPlayers: { [Player]: boolean } = {}
+local awaitingAwakeningPlayers: { [Player]: boolean } =
+	PlayerScoped.New("CharacterCreationSystem.awaitingAwakeningPlayers")
 
 -- Both handlers below do real yielding server work (WaitForProfile, TextService:
 -- FilterStringAsync) before their own in-flight guards (spawnedThisSession/finalizingPlayers) can
@@ -589,15 +591,6 @@ local function handleAwakeningComplete(player: Player): ()
 	logger:info("Awakening complete -- isolation cleared", { player = player.Name })
 end
 
-local function onPlayerRemoving(player: Player): ()
-	spawnedThisSession[player] = nil
-	finalizingPlayers[player] = nil
-	awaitingAwakeningPlayers[player] = nil
-	getOnboardingStateRateLimiter:Clear(player)
-	finalizeRateLimiter:Clear(player)
-	awakeningCompleteRateLimiter:Clear(player)
-end
-
 function CharacterCreationSystem.Init(): ()
 	local endpoint = Endpoint.Scope("CharacterCreationSystem", logger)
 
@@ -631,7 +624,6 @@ function CharacterCreationSystem.Init(): ()
 
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "CharacterCreationSystem",
-		OnPlayerRemoving = onPlayerRemoving,
 	})
 
 	logger:info("CharacterCreationSystem.Init() complete")

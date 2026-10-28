@@ -41,6 +41,7 @@ local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local CameraShake = require(script.Parent.CameraShake)
 local FOVOffset = require(script.Parent.FOVOffset)
+local HighlightBudget = require(script.Parent.HighlightBudget)
 
 local PRESENTATION = AirComboConstants.Presentation
 local COLORS = PRESENTATION.Colors
@@ -147,7 +148,10 @@ local function flash(character: Model, color: Color3): ()
 	if not root or not withinDrawDistance(root.Position) then
 		return
 	end
-	local highlight = Instance.new("Highlight")
+	local highlight = HighlightBudget.Acquire("AirComboFlash")
+	if highlight == nil then
+		return
+	end
 	highlight.FillColor = color
 	highlight.OutlineColor = color
 	highlight.FillTransparency = 0.35
@@ -183,13 +187,17 @@ local function heldVisuals(character: Model, humanoid: Humanoid): Trove.TroveIns
 				column.CFrame = CFrame.new(root.Position - Vector3.new(0, PRESENTATION.ColumnHeightStuds * 0.5 + 1, 0))
 			end
 		end)
-		local highlight = trove:Add(Instance.new("Highlight"))
-		highlight.FillTransparency = 1
-		highlight.OutlineColor = COLORS.Held
-		highlight.OutlineTransparency = 0.3
-		highlight.DepthMode = Enum.HighlightDepthMode.Occluded
-		highlight.Adornee = character
-		highlight.Parent = folder()
+		-- The outline is skipped when the client's Highlight budget is spent; the column above still marks the hold.
+		local highlight = HighlightBudget.Acquire("AirComboHeld")
+		if highlight then
+			trove:Add(highlight)
+			highlight.FillTransparency = 1
+			highlight.OutlineColor = COLORS.Held
+			highlight.OutlineTransparency = 0.3
+			highlight.DepthMode = Enum.HighlightDepthMode.Occluded
+			highlight.Adornee = character
+			highlight.Parent = folder()
+		end
 	else
 		-- The attacker's wind trail.
 		local top = trove:Add(Instance.new("Attachment"))

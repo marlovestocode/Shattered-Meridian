@@ -27,10 +27,9 @@ local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
 
+local SettingsRows = require(script.Parent.SettingsRows)
 local Tokens = require(script.Parent.Parent.Parent.Tokens)
 local Dropdown = require(script.Parent.Parent.Parent.Components.Dropdown)
-local Label = require(script.Parent.Parent.Parent.Components.Label)
-local Stepper = require(script.Parent.Parent.Parent.Components.Stepper)
 local Toggle = require(script.Parent.Parent.Parent.Components.Toggle)
 
 local Children = Fusion.Children
@@ -123,90 +122,6 @@ local function formatUIScale(value: number): string
 	return string.format("%d%%", math.round(value * 100))
 end
 
--- Copied from Settings/ControllerTab.lua rather than shared -- see that file's own comment on why a
--- second tab needing the same eight lines is not yet the third caller that would earn a component.
-local function numberRow(
-	scope: Scope,
-	label: string,
-	hint: string,
-	value: UsedAs<number>,
-	min: number,
-	max: number,
-	step: number,
-	format: (number) -> string,
-	onChanged: (number) -> (),
-	layoutOrder: number
-): Frame
-	return scope:New "Frame" {
-		Name = `Row_{label}`,
-		Size = UDim2.fromScale(1, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
-		BackgroundTransparency = 1,
-		LayoutOrder = layoutOrder,
-
-		[Children] = {
-			scope:New "UIListLayout" {
-				FillDirection = Enum.FillDirection.Vertical,
-				Padding = UDim.new(0, 2),
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			},
-			scope:New "Frame" {
-				Name = "Control",
-				Size = UDim2.new(1, 0, 0, 32),
-				BackgroundTransparency = 1,
-				LayoutOrder = 1,
-
-				[Children] = {
-					Label(scope, {
-						Text = label,
-						Scale = "Body",
-						Color = Tokens.Color.TextPrimary,
-						AnchorPoint = Vector2.new(0, 0.5),
-						Position = UDim2.fromScale(0, 0.5),
-					}),
-					Stepper.Mount(scope, {
-						Value = value,
-						Min = min,
-						Max = max,
-						Step = step,
-						FormatValue = format,
-						OnChanged = onChanged,
-						AnchorPoint = Vector2.new(1, 0.5),
-						Position = UDim2.fromScale(1, 0.5),
-					}),
-				},
-			},
-			Label(scope, {
-				Text = hint,
-				Scale = "Detail",
-				Color = Tokens.Color.TextSecondary,
-				Size = UDim2.fromScale(1, 0),
-				AutomaticSize = Enum.AutomaticSize.Y,
-				TextWrapped = true,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				LayoutOrder = 2,
-			}),
-		},
-	} :: Frame
-end
-
-local function sectionLabel(scope: Scope, text: string, layoutOrder: number): Frame
-	return scope:New "Frame" {
-		Name = "SectionLabel",
-		Size = UDim2.new(1, 0, 0, 22),
-		BackgroundTransparency = 1,
-		LayoutOrder = layoutOrder,
-
-		[Children] = Label(scope, {
-			Text = text,
-			Scale = "Detail",
-			Color = Tokens.Color.TextSecondary,
-			AnchorPoint = Vector2.new(0, 1),
-			Position = UDim2.fromScale(0, 1),
-		}),
-	} :: Frame
-end
-
 local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFrame
 	-- One Computed per field, derived from the single Parkour Value -- so the screen re-renders from
 	-- one source of truth rather than from seven independently-written Values that could disagree.
@@ -240,7 +155,7 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 			SortOrder = Enum.SortOrder.LayoutOrder,
 		},
 
-		sectionLabel(scope, "MOVEMENT", 1),
+		SettingsRows.SectionLabel(scope, "MOVEMENT", 1),
 		Toggle(scope, {
 			Label = "Parkour movement",
 			Value = fieldValue("Enabled"),
@@ -269,7 +184,7 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 			LayoutOrder = 4,
 		}),
 
-		sectionLabel(scope, "CAMERA", 5),
+		SettingsRows.SectionLabel(scope, "CAMERA", 5),
 		Toggle(scope, {
 			Label = "Movement camera effects",
 			Value = fieldValue("CameraEffects"),
@@ -316,7 +231,7 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 			LayoutOrder = 9,
 		}),
 
-		sectionLabel(scope, "MOVEMENT ASSISTS", 10),
+		SettingsRows.SectionLabel(scope, "MOVEMENT ASSISTS", 10),
 	}
 
 	for index, row in ASSIST_ROWS do
@@ -335,10 +250,10 @@ local function GameplayTab(scope: Scope, props: GameplayTabProps): ScrollingFram
 		)
 	end
 
-	table.insert(rows, sectionLabel(scope, "INTERFACE", 15))
+	table.insert(rows, SettingsRows.SectionLabel(scope, "INTERFACE", 15))
 	table.insert(
 		rows,
-		numberRow(
+		SettingsRows.NumberRow(
 			scope,
 			"UI scale",
 			"Resizes the hotbar, menus and every other on-screen panel together.",

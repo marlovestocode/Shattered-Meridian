@@ -116,6 +116,17 @@ local AttributeConstants = {
 	-- already cut short. The defence layer sits BELOW the damage layer, so it may not require it; this
 	-- Attribute is the seam, the same way CombatBusyUntil is RunSystem's.
 	HitstunUntil = "HitstunUntil",
+	-- The ragdoll (Server/Combat/Ragdoll/RagdollSystem.lua is the ONLY writer of all three; check-single-writers).
+	--   Ragdolled           true while the body is limp or getting up -- the server holds it. Read through
+	--                       BodyRestraint ("Ragdolled") by every gate, on both machines. nil, never false.
+	--   RagdollChainEndsAt  server os.clock(): the latest a limp body may be refreshed by another ragdolling hit
+	--                       (RagdollConstants.Rules.MaxChainSeconds from its first fall).
+	--   RagdollImmuneUntil  server os.clock(): no new ragdoll before this (Rules.ImmunitySeconds after getting up).
+	-- The two deadlines are read only by Shared/Ragdoll/RagdollRules.Admits, server-side, which is how DamageSystem
+	-- knows whether a hit will ragdoll without requiring the runtime above it.
+	Ragdolled = "Ragdolled",
+	RagdollChainEndsAt = "RagdollChainEndsAt",
+	RagdollImmuneUntil = "RagdollImmuneUntil",
 	-- Whether this client currently has a modal UI panel open -- the character menu, Settings, the
 	-- Move Editor, the Live Console, DevMenu, the bug reporter. Written by
 	-- Client/UI/Components/ModalScreen.lua (the one thing that creates a modal, so it is the one
@@ -134,6 +145,9 @@ local AttributeConstants = {
 	-- the character menu), so ModalScreen tracks how many are open and publishes `count > 0`. A plain
 	-- boolean would let closing either one re-arm the player's fists while the other is still up.
 	UiModalOpen = "UiModalOpen",
+	-- Client-only, beside UiModalOpen (Client/UI/Shell/ModalCount.lua): true while every open modal is a docked surface
+	-- that must leave the world visible (the World Architect), so Chrome does not dim the world behind it.
+	UiModalWorldVisible = "UiModalWorldVisible",
 	-- Parkour System (Server/Systems/ParkourSystem.lua, Client/Parkour/*). Set on a player's own
 	-- Humanoid while the client-side movement framework legitimately owns that character's velocity --
 	-- a slide, wall-run, vault, mantle, ledge climb, roll or wall-jump the server has accepted and not
@@ -166,22 +180,22 @@ local AttributeConstants = {
 	-- The ROTATION counterpart to ParkourVelocityOwned above, and unlike every other Attribute in this
 	-- table it is written by the CLIENT, not the server: Client/Parkour/ParkourMotor.lua raises it for
 	-- exactly the window in which it owns the character's facing (the AlignOrientation drive in Velocity
-	-- mode, the anchored CFrame write in Kinematic mode), and Client/Camera/ShiftLockCamera.lua reads it
+	-- mode, the anchored CFrame write in Kinematic mode), and Client/Camera/CombatCamera.lua reads it
 	-- to stand its own per-frame yaw write down for the duration. Both ends are on the same client and
 	-- nothing on the server reads it, so client-set (which does not replicate) is exactly right --
 	-- this is one client-side presentation module coordinating with another, which is why it is an
 	-- Attribute rather than a NetworkBridge remote.
 	--
-	-- It exists as an Attribute rather than a direct ParkourMotor -> ShiftLockCamera function call to
+	-- It exists as an Attribute rather than a direct ParkourMotor -> CombatCamera function call to
 	-- keep the require graph one-directional: the camera folder is not mounted in test.project.json, so
 	-- requiring it from the motor would drag Fusion and the whole camera stack into the parkour state
 	-- registry's load chain and break Tests/Parkour/StateRegistry.spec. Same reactive
-	-- GetAttributeChangedSignal shape ShiftLockCamera already uses for Flying/RootControlLocked, so it
+	-- GetAttributeChangedSignal shape CombatCamera already uses for Flying/RootControlLocked, so it
 	-- costs that module a cached boolean and no new dependency in either direction.
 	ParkourFacingOwned = "ParkourFacingOwned",
 	-- CLIENT-WRITTEN, like ParkourFacingOwned directly above and for the same reason: true while
 	-- Client/Combat/SwingTracking.lua is turning the local body toward its target during a swing's windup.
-	-- Client/Camera/ShiftLockCamera.lua skips its per-frame yaw write while it is set, exactly as it does
+	-- Client/Camera/CombatCamera.lua skips its per-frame yaw write while it is set, exactly as it does
 	-- for ParkourFacingOwned. An Attribute rather than a require, so the camera never depends on the combat
 	-- client. Never replicates, never an authority: the server's hitbox reads the real replicated facing.
 	CombatFacingOwned = "CombatFacingOwned",

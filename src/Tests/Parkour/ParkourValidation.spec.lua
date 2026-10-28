@@ -313,9 +313,8 @@ return function()
 				OpenStartedAt = 99.9,
 				OpenStartPosition = Vector3.new(0, 10, 0),
 			})
-			-- The claimed position also has to stay near the server's own CURRENT view (the shared
-			-- claimDrift check above the phase split, still live) -- moved with it so this test isolates
-			-- the removed START-to-END travel-rate check rather than tripping that one instead.
+			-- The server's current view moves with the claim, so this isolates the removed START-to-END
+			-- travel-rate check (the claim-drift check is Start-only now too -- see the cases below).
 			state.Position = Vector3.new(80, 10, 0)
 			expect(ParkourValidation.Validate(endReport({ Position = Vector3.new(80, 10, 0) }), state, CONFIG)).to.equal(
 				true
@@ -345,6 +344,26 @@ return function()
 				OpenStartPosition = ORIGIN,
 			})
 			expect(ParkourValidation.Validate(endReport(), state, CONFIG)).to.equal(true)
+		end)
+
+		it("accepts an End carrying a speed past the cap -- a knockback ends a slide at the launch's speed", function()
+			-- Speed and position were the last two checks still running on an End. A big launch landing
+			-- mid-slide hands the slide's End the launch's planar speed, and the release was refused.
+			local state = observed({ OpenKind = "Slide", OpenStartedAt = 99, OpenStartPosition = ORIGIN })
+			expect(ParkourValidation.Validate(endReport({ Speed = 500 }), state, CONFIG)).to.equal(true)
+			expect(ParkourValidation.Validate(endReport({ Speed = -1 }), state, CONFIG)).to.equal(true)
+		end)
+
+		it("accepts an End whose claimed position is far from the server's view", function()
+			local state = observed({ OpenKind = "Slide", OpenStartedAt = 99, OpenStartPosition = ORIGIN })
+			expect(ParkourValidation.Validate(endReport({ Position = Vector3.new(5000, 10, 0) }), state, CONFIG)).to.equal(
+				true
+			)
+		end)
+
+		it("still grants no more carry than the cap for an over-cap End", function()
+			-- The reward half is where an End's numbers are policed, and it still is.
+			expect(ParkourValidation.ResolveMomentumCarry(500, nil, true, CONFIG)).to.equal(CONFIG.MaxReportedSpeed)
 		end)
 	end)
 

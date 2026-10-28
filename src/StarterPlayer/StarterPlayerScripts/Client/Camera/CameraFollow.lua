@@ -22,8 +22,8 @@
 	every frame -- which also keeps a body turning in place (a swing tracking its target) from moving the
 	camera at all.
 
-	TIMING. Bound at RenderPriority.Camera - 3: after the frame's physics has moved the root, before the
-	composer writes CameraOffset (Camera - 1) and before the camera scripts read it (Camera). So the
+	TIMING. Bound at FrameOrder's CameraFollow slot: after the frame's physics has moved the root, before the
+	composer writes CameraOffset and before the camera scripts read it (Camera). So the
 	trail describes THIS frame's body, not last frame's.
 
 	STANDS DOWN, AND RELEASES SMOOTHLY, whenever the default follow camera is not the one framing this
@@ -33,8 +33,8 @@
 	CameraConstants.Follow.ReleaseEaseSpeed rather than being cleared, so a hand-off never snaps the view
 	by the last trail's worth.
 
-	Does not own: the camera's rotation (the camera scripts, LockOnController, ShiftLockCamera), its
-	shake (CameraShake), FOV (FOVOffset), or any other CameraOffset slot (ShiftLockCamera's shoulder,
+	Does not own: the camera's rotation (the camera scripts, LockOnController, CombatCamera), its
+	shake (CameraShake), FOV (FOVOffset), or any other CameraOffset slot (CombatCamera's shoulder,
 	FlightCamera's chase, ParkourCamera's dips all sum with this one in the composer).
 ]]
 
@@ -51,6 +51,7 @@ local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
 local CameraOffsetComposer = require(script.Parent.Parent.FX.CameraOffsetComposer)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("CameraFollow")
 
@@ -66,7 +67,7 @@ local engaged = false
 
 local humanoid: Humanoid? = nil
 local rootPart: BasePart? = nil
--- Cached off the Humanoid's Attributes, the same watch shape ShiftLockCamera keeps for the same two: a
+-- Cached off the Humanoid's Attributes, the same watch shape CombatCamera keeps for the same two: a
 -- GetAttribute call every rendered frame would not be free.
 local flying = false
 local mounted = false
@@ -153,7 +154,7 @@ function CameraFollow.Start(): ()
 		OnCharacterRemoving = onCharacterRemoving,
 	})
 
-	RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Camera.Value - 3, onRenderStep)
+	RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("CameraFollow"), onRenderStep)
 	logger:info("CameraFollow started")
 end
 

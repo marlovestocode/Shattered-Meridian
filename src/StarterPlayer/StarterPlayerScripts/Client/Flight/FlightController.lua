@@ -54,7 +54,7 @@
 	flew into a fight and got hit or air-combo'd while Flying stayed true). Without this, flight kept
 	driving its own position/orientation writes on every Heartbeat regardless of what else was holding
 	the body, fighting the server's own ragdoll joints or hold constraints for every frame both were
-	active -- the same class of bug Client/Camera/ShiftLockCamera.lua's own yaw write already had, and
+	active -- the same class of bug Client/Camera/CombatCamera.lua's own yaw write already had, and
 	the exact same server-Attribute-on-Humanoid pattern is reused here (same Attribute name, same
 	watch-and-cache-a-local shape) rather than re-deriving a second mechanism for the same signal.
 ]]
@@ -125,7 +125,7 @@ local sonicBoomLastFireClock = 0
 -- Mirrors this character's own Humanoid "RootControlLocked" Attribute -- see this file's header,
 -- "Root-control lock". Cached in a local rather than read fresh every Heartbeat so stepFlight's hot
 -- path is a plain boolean check, not a GetAttribute call every frame -- same reasoning and shape as
--- ShiftLockCamera.lua's own `rootControlLocked` local. Kept current via GetAttributeChangedSignal in
+-- CombatCamera.lua's own `rootControlLocked` local. Kept current via GetAttributeChangedSignal in
 -- BindCharacter, alongside the existing Flying/FlyCollide watches.
 local rootControlLocked = false
 
@@ -143,7 +143,7 @@ local function angleDelta(to: number, from: number): number
 	return (to - from + math.pi) % (2 * math.pi) - math.pi
 end
 
--- Shared with FOVOffset.lua/ShiftLockCamera.lua/FlightCamera.lua's own ease call sites --
+-- Shared with FOVOffset.lua/CombatCamera.lua/FlightCamera.lua's own ease call sites --
 -- Shared/FlightMath.EaseAlpha computes the rate->alpha conversion; angleDelta above handles the
 -- wrap-around this angular (not linear) ease needs on top of it.
 local function easeAngle(current: number, target: number, ratePerSecond: number, deltaTime: number): number
@@ -319,7 +319,7 @@ local function stepFlight(humanoid: Humanoid, rootPart: BasePart, deltaTime: num
 
 	local collideMode = humanoid:GetAttribute(AttributeConstants.FlyCollide) == true
 	-- Server-owned root control always wins -- see this file's header, "Root-control lock". Skips
-	-- ONLY the position/orientation write itself, the same narrow scope ShiftLockCamera.lua's own
+	-- ONLY the position/orientation write itself, the same narrow scope CombatCamera.lua's own
 	-- gated yaw write uses: currentVelocity/previousHoverBobOffset keep updating underneath so flight
 	-- resumes smoothly the instant the lock clears, instead of resuming from a frozen, one-Heartbeat-
 	-- stale snapshot, and the rest of this function (landing detection, sonic boom, camera/audio feed)
@@ -477,7 +477,7 @@ function FlightController.BindCharacter(character: Model): ()
 	-- A fresh character's Humanoid never carries over the old one's Attributes -- seed from whatever
 	-- the server has already set (same "read rather than assume" reasoning as the Flying/FlyCollide
 	-- reads below) and keep it live from here on. See this file's header, "Root-control lock", and
-	-- ShiftLockCamera.lua's onCharacterAdded for the identical watch shape on the same Attribute.
+	-- CombatCamera.lua's onCharacterAdded for the identical watch shape on the same Attribute.
 	rootControlLocked = humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true
 	attributeTrove:Connect(humanoid:GetAttributeChangedSignal(AttributeConstants.RootControlLocked), function()
 		rootControlLocked = humanoid:GetAttribute(AttributeConstants.RootControlLocked) == true

@@ -21,6 +21,7 @@ local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
+local FlightMath = require(ReplicatedStorage.Shared.FlightMath)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 
 local CombatTargets = {}
@@ -84,23 +85,10 @@ function CombatTargets.NearestInCone(
 	return best
 end
 
--- The yaw (radians, Roblox's convention: CFrame.Angles(0, yaw, 0) looks along it) of flat `direction`,
--- or nil for a degenerate one.
-function CombatTargets.YawOf(direction: Vector3): number?
-	local flat = Vector3.new(direction.X, 0, direction.Z)
-	if flat.Magnitude < 1e-3 then
-		return nil
-	end
-	return math.atan2(-flat.X, -flat.Z)
-end
-
--- The signed shortest difference `to - from` between two angles, in (-pi, pi].
-function CombatTargets.AngleDelta(from: number, to: number): number
-	local delta = (to - from) % (2 * math.pi)
-	if delta > math.pi then
-		delta -= 2 * math.pi
-	end
-	return delta
-end
+-- The yaw (radians, Roblox's convention: CFrame.Angles(0, yaw, 0) looks along it) of flat `direction`, or nil for a
+-- degenerate one, and the signed shortest difference between two angles. Both are Shared/FlightMath's, re-exported so a
+-- combat caller has them beside the target queries; there is one copy of each.
+CombatTargets.YawOf = FlightMath.YawFromFlatDirection
+CombatTargets.AngleDelta = FlightMath.AngleDelta
 
 return CombatTargets

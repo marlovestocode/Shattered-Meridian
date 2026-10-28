@@ -71,6 +71,9 @@
 					"Diagnostics": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Diagnostics"
 					},
+					"Config": {
+						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Config"
+					},
 					"Announcement": {
 						"$path": "src/StarterPlayer/StarterPlayerScripts/Client/Announcement"
 					},
@@ -127,6 +130,9 @@
 				},
 				"Vessel": {
 					"$path": "src/ServerScriptService/Server/Vessel"
+				},
+				"WorldArchitect": {
+					"$path": "src/ServerScriptService/Server/WorldArchitect"
 				},
 				"Boat": {
 					"$path": "src/ServerScriptService/Server/Boat"

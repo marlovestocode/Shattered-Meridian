@@ -34,12 +34,12 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local Stats = game:GetService("Stats")
-local UserInputService = game:GetService("UserInputService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local Layers = require(script.Parent.Parent.UI.Shell.Layers)
+local InputRouter = require(script.Parent.Parent.Input.InputRouter)
 
 local logger = Logger.scope("FpsCounter")
 
@@ -230,8 +230,8 @@ function FpsCounter.Start(): ()
 		table.clear(worst)
 	end)
 
-	UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
-		if gameProcessed or input.KeyCode ~= Config.ToggleKeyCode then
+	InputRouter.BindDebugKey("FpsCounter", function(gameProcessed: boolean)
+		if gameProcessed then
 			return
 		end
 		gui.Enabled = not gui.Enabled

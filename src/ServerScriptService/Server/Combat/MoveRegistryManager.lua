@@ -18,8 +18,8 @@
 	reject (the author clearly meant to author one), and the numbers inside are clamped. Grab reads its
 	bounds from GrabConstants.Limits and Art from ArtConstants.Limits -- each runtime owns its own range.
 	Projectile (the move type) goes through ProjectileTypes.Validate, whose Limits the editor renders too,
-	and Presentation through MovePresentationTypes.Validate, and Domain through DomainTypes.Validate, the
-	same way.
+	and Presentation through MovePresentationTypes.Validate, Domain through DomainTypes.Validate and Ragdoll
+	through RagdollTypes.Validate, the same way.
 
 	Upsert/Delete touch memory only. That is what makes a Preview take effect on the very next swing with
 	no DataStore round trip; MoveEditorSystem decides when anything is persisted.
@@ -40,6 +40,7 @@ local DomainTypes = require(ReplicatedStorage.Shared.Domain.DomainTypes)
 local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresentationTypes)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local ProjectileTypes = require(ReplicatedStorage.Shared.HitboxEngine.ProjectileTypes)
+local RagdollTypes = require(ReplicatedStorage.Shared.Ragdoll.RagdollTypes)
 local Sanitize = require(ReplicatedStorage.Shared.Sanitize)
 local WeaponAssets = require(ReplicatedStorage.Shared.Combat.WeaponAssets)
 
@@ -402,6 +403,21 @@ function MoveRegistryManager.Validate(candidate: unknown): (MoveTypes.MoveDefini
 		return nil, presentationError
 	end
 
+	-- The ragdoll (RagdollTypes.Validate): strict on the trigger and on value types, clamping on numbers.
+	local ragdoll: MoveTypes.MoveRagdoll? = nil
+	if raw.Ragdoll ~= nil then
+		local spec, ragdollError = RagdollTypes.Validate(raw.Ragdoll)
+		if not spec then
+			return nil, ragdollError or "InvalidRagdoll"
+		end
+		ragdoll = spec
+	end
+	-- A launcher hands the body to the air combo, which already owns it for the frames a ragdoll would want. A
+	-- grab is allowed: its ragdoll happens on the THROW, when the hand lets go (RagdollSystem's onThrown).
+	if ragdoll and knockback and knockback.StartsAirCombo then
+		return nil, "LauncherCannotRagdoll"
+	end
+
 	return {
 		MoveId = moveId,
 		DisplayName = displayName,
@@ -440,6 +456,7 @@ function MoveRegistryManager.Validate(candidate: unknown): (MoveTypes.MoveDefini
 		Projectile = projectile,
 		Presentation = presentation,
 		Domain = domain,
+		Ragdoll = ragdoll,
 	},
 		nil
 end

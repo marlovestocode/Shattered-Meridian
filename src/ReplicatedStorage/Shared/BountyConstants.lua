@@ -46,9 +46,8 @@ BountyConstants.RemoteNames = {
 	-- never on a timer and never per-kill. See BountySystem.lua's own note on why this broadcast is
 	-- not the unfiltered-FireAllClients shape the audit's Tier 2.1 flagged.
 	BoardUpdated = "Bounty_BoardUpdated",
-	-- Client -> server, the pull used when the bounty board menu opens, so a freshly-opened menu
-	-- doesn't sit empty until the next change happens to be broadcast.
-	GetActiveBounties = "Bounty_GetActiveBounties",
+	-- (Bounty_GetActiveBounties, the pull for a freshly-opened menu, was removed 2026-10-27: ClientState caches the board
+	-- broadcast and PlayerState_Replay re-sends it to a client that joined after the last change.)
 	-- Server -> the marked player ONLY. Being hunted is information the target must have -- see
 	-- BountySystem.lua's header on why this is a separate targeted remote rather than something the
 	-- client infers by scanning the broadcast board for its own name.
@@ -99,11 +98,6 @@ BountyConstants.ExpirySweepIntervalSeconds = 15
 -- bounds the entry for a kill the spine refused (weighted to zero), which never comes back for it. Swept on
 -- the expiry sweep above, so an entry may live up to this plus one interval.
 BountyConstants.OwedClaimSeconds = 10
-
--- Read-only query remote, still rate limited -- same reasoning and same value as
--- Constants.Rivalry.QueryMaxCallsPerSecond: a modified client looping it gains nothing but costs
--- server time for free otherwise.
-BountyConstants.QueryMaxCallsPerSecond = 4
 
 -- Page size cap for the board query, so one invoke can never ask the server to serialize an
 -- unbounded list. Bounties are bounded by player count in practice (at most one per player), so this

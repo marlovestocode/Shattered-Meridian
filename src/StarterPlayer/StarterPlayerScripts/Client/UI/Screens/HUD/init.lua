@@ -844,7 +844,7 @@ function HUD.Mount(
 
 		dockBand = scope:New "Frame" {
 			Name = "DockBand",
-		LayoutOrder = 5,
+			LayoutOrder = 5,
 			Size = UDim2.fromOffset(0, 0),
 			AutomaticSize = Enum.AutomaticSize.XY,
 			BackgroundTransparency = 1,

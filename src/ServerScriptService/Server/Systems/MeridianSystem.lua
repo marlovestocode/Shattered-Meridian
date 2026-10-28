@@ -31,10 +31,11 @@ local ServerScriptService = game:GetService("ServerScriptService")
 
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("MeridianSystem")
 
@@ -120,7 +121,14 @@ local function onProfileLoaded(player: Player): ()
 end
 
 function MeridianSystem.Init(): ()
-	meridianXpUpdatedRemote = NetworkBridge.CreateRemoteEvent(Constants.Meridian.RemoteNames.XPUpdated)
+	-- The balance only -- no `Gained`, so a replay never shows a gain cue twice (PlayerStateSystem's header).
+	PlayerStateSystem.Register("MeridianXP", function(player: Player)
+		if PlayerDataSystem.IsLoaded(player) then
+			sendMeridianUpdate(player, MeridianSystem.GetMeridianXP(player))
+		end
+	end)
+	local endpoint = Endpoint.Scope("MeridianSystem", logger)
+	meridianXpUpdatedRemote = endpoint.Push(Constants.Meridian.RemoteNames.XPUpdated)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
 

@@ -78,7 +78,7 @@ end
 -- Fraction of the remaining gap to a target to close THIS frame, for a frame-rate-independent
 -- exponential ease (alpha = 1 - e^(-rate*dt)) -- before this extraction, the single most-repeated
 -- formula across the client camera/flight code, independently reimplemented in Client/Camera/
--- FlightCamera.lua (FOV-delta and chase-offset ease), Client/Camera/ShiftLockCamera.lua (shoulder-
+-- FlightCamera.lua (FOV-delta and chase-offset ease), Client/Camera/CombatCamera.lua (shoulder-
 -- offset CameraOffset ease), Client/Flight/FlightController.lua (yaw/pitch/bank easeAngle), and
 -- Client/FX/FOVOffset.lua (continuous-slot ease). Deliberately returns just the alpha rather than
 -- an eased value: the four call sites apply it to three different shapes (a plain number via
@@ -129,8 +129,63 @@ function FlightMath.SpringStep(
 	return value + deltaTime * nextVelocity, nextVelocity
 end
 
+-- Sub-step ceiling for SpringAdvance. 1/120 s keeps implicit Euler's numerical damping small (about omega*h/2 of extra
+-- damping ratio) and the same at every frame rate at or below 120 fps; above that one step per frame is already shorter.
+local SPRING_SUBSTEP_SECONDS = 1 / 120
+local SPRING_MAX_SUBSTEPS = 24
+
+-- SpringStep run in sub-steps of at most SPRING_SUBSTEP_SECONDS, for a spring whose CURVE must not depend on the frame
+-- rate -- a camera, where 30 fps and 144 fps players should see the same lean and the same landing. SpringStep alone is
+-- stable at any deltaTime but damps more the longer the step, so at 30 fps a spring visibly settles flatter than at 144.
+-- The sub-step count is capped, so a multi-second hitch costs a bounded loop and degrades to the plain step's settle.
+function FlightMath.SpringAdvance(
+	value: number,
+	velocity: number,
+	target: number,
+	frequency: number,
+	damping: number,
+	deltaTime: number
+): (number, number)
+	local steps = math.clamp(math.ceil(deltaTime / SPRING_SUBSTEP_SECONDS), 1, SPRING_MAX_SUBSTEPS)
+	local step = deltaTime / steps
+	for _ = 1, steps do
+		value, velocity = FlightMath.SpringStep(value, velocity, target, frequency, damping, step)
+	end
+	return value, velocity
+end
+
+-- For a caller that wants a kicked spring to peak at a chosen displacement: kick it with peak / SpringPeakFactor.
+-- The furthest a spring starting at rest on its target travels per unit of initial velocity: peak = velocity * factor.
+-- Underdamped: x(t) = (v0 / wd) e^(-zeta w t) sin(wd t), whose first maximum is at t = atan2(wd, zeta w) / wd.
+-- At critical damping the maximum is v0 / (w e), at t = 1 / w. Overdamped, x(t) = v0 (e^(l1 t) - e^(l2 t)) / (l1 - l2) with
+-- l = -w (zeta -/+ sqrt(zeta^2 - 1)), whose maximum is where l1 e^(l1 t) = l2 e^(l2 t).
+function FlightMath.SpringPeakFactor(frequency: number, damping: number): number
+	if damping == 1 then
+		return 1 / (frequency * math.exp(1))
+	end
+	if damping > 1 then
+		local root = math.sqrt(damping * damping - 1)
+		local slow = -frequency * (damping - root)
+		local fast = -frequency * (damping + root)
+		local peakTime = math.log(fast / slow) / (slow - fast)
+		return (math.exp(slow * peakTime) - math.exp(fast * peakTime)) / (slow - fast)
+	end
+	local root = math.sqrt(1 - damping * damping)
+	return math.exp(-damping / root * math.atan2(root, damping)) / frequency
+end
+
+-- The signed shortest difference `to - from` between two angles, in (-pi, pi] -- so a spring or an ease on an angle
+-- always turns the short way round. Client/Combat/CombatTargets.AngleDelta is this function.
+function FlightMath.AngleDelta(from: number, to: number): number
+	local delta = (to - from) % (2 * math.pi)
+	if delta > math.pi then
+		delta -= 2 * math.pi
+	end
+	return delta
+end
+
 -- Yaw angle (radians) of a direction vector's flattened (Y-zeroed) XZ projection -- shared by
--- Client/Camera/ShiftLockCamera.lua (deriving character facing from the camera's own look vector)
+-- Client/Camera/CombatCamera.lua (deriving character facing from the camera's own look vector)
 -- and Client/Flight/FlightController.lua (deriving character facing from flight velocity), which
 -- had independently arrived at the identical formula: CFrame.Angles(0, yaw, 0) has LookVector
 -- (-sin(yaw), 0, -cos(yaw)); solving for the flattened direction gives yaw = atan2(-x, -z). Returns
@@ -144,7 +199,7 @@ function FlightMath.YawFromFlatDirection(direction: Vector3): number?
 		return nil
 	end
 	local unit = flat.Unit
-	-- Same formula Client/Camera/ShiftLockCamera.lua and Client/Flight/FlightController.lua's own
+	-- Same formula Client/Camera/CombatCamera.lua and Client/Flight/FlightController.lua's own
 	-- (now-removed) local copies used: CFrame.Angles(0, yaw, 0) has LookVector (-sin(yaw), 0,
 	-- -cos(yaw)) -- yaw=0 faces -Z (Roblox's default forward), yaw=+pi/2 faces -X (NOT +X -- see
 	-- this function's own spec for the direction this sign convention actually produces). Solving

@@ -4,11 +4,11 @@
 
 	Owns: playing a move's three SWING cues -- Windup, Active and Recovery (Shared/Combat/
 	MovePresentationTypes.lua) -- on the thrower's own client, scheduled off the same Attack_Started payload
-	CombatAudio's whoosh and AttackTrail's trail already schedule against.
+	CombatAudio's whoosh and SwingTrail's trail already schedule against.
 
 	THE EVENT, AND ITS LIMIT. Attack_Started is a FireClient to the attacker alone (AttackRequestSystem's
 	sendStarted); no client learns that anyone ELSE began a swing. So these cues are the thrower's only --
-	the same limit AttackTrail's header records for the trail. Other players read an incoming swing from
+	the same limit SwingTrail's header records for the trail. Other players read an incoming swing from
 	its replicated animation and the heavy tell (SwingTellFX), not from here. A third-party swing cue would
 	need the attack layer to broadcast a swing start: a new signal, deliberately not invented for this.
 
@@ -20,7 +20,7 @@
 
 	WHO PLAYS WHAT. The Active cue's SOUND is the swing whoosh, and CombatAudio owns that whoosh with its
 	weapon and shared layers beneath the move's -- so this module plays every other channel of the Active
-	cue and leaves the sound to it. Its TrailColor is AttackTrail's. Windup and Recovery have no default
+	cue and leaves the sound to it. Its TrailColor is SwingTrail's. Windup and Recovery have no default
 	sound or effect at all: their cues play here in full through CombatAudio.PlayCue, and unset means
 	nothing, as it always did.
 
@@ -127,7 +127,7 @@ end
 
 local function onAttackStarted(payload: AttackTypes.AttackStartedPayload): ()
 	-- A new swing retires whatever the last one still had pending (a hit-confirm cancel into a follow-up
-	-- never reaches the old swing's recovery) -- AttackTrail's "a new swing always retires the last" rule.
+	-- never reaches the old swing's recovery) -- SwingTrail's "a new swing always retires the last" rule.
 	cancelEpoch += 1
 	stopSwingLoops()
 	local moveId = payload.MoveId

@@ -55,15 +55,17 @@ LockOnConstants.Camera = {
 	-- speed the instant the target's bearing jumps -- and in a fight it jumps constantly: every step-in,
 	-- every lunge, every sidestep at arm's length. The camera snapped at the start of each of those. A
 	-- spring carries its own angular velocity, so it accelerates into a turn and eases out of it.
-	YawFrequency = 14,
-	PitchFrequency = 9,
+	-- Softened 2026-10-27 (was 14 / 9, close-range 0.4): the old pull whipped the view through every sidestep in a
+	-- brawl. The target still stays on screen through a strafe; the player's own look wins more of each frame.
+	YawFrequency = 11,
+	PitchFrequency = 7,
 	Damping = 1,
 	-- CLOSE RANGE, THE PULL SOFTENS. At arm's length a half-stud sidestep swings the bearing by 10 degrees
 	-- or more, so a full-strength pull there whips the camera on every exchange. Inside CloseRangeStuds the
 	-- frequencies are scaled down linearly, to CloseRangeScale at MinDistanceStuds, so a brawl reads as
 	-- steady and the camera still tracks a target that is really moving away.
 	CloseRangeStuds = 8,
-	CloseRangeScale = 0.4,
+	CloseRangeScale = 0.3,
 	-- The camera looks slightly DOWN on the target rather than straight at it, so the ground between you
 	-- stays in view. Radians added to the pitch that would aim exactly at the target point.
 	PitchBias = math.rad(-8),

@@ -32,6 +32,15 @@ function AirComboAttributes.IsHeld(humanoid: Humanoid): boolean
 	return live(humanoid, AttributeConstants.AirHeldUntil)
 end
 
+-- Seconds until this body's air-combo hold ends, 0 when it is not held.
+function AirComboAttributes.HeldSecondsLeft(humanoid: Humanoid): number
+	local untilTime = humanoid:GetAttribute(AttributeConstants.AirHeldUntil)
+	if typeof(untilTime) ~= "number" then
+		return 0
+	end
+	return math.max(untilTime - Workspace:GetServerTimeNow(), 0)
+end
+
 -- A live combo's attacker right now.
 function AirComboAttributes.IsAttacker(humanoid: Humanoid): boolean
 	return live(humanoid, AttributeConstants.AirComboAttackerUntil)

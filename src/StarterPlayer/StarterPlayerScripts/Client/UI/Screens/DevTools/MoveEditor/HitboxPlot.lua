@@ -28,8 +28,11 @@
 	step against. Any other Shape is the BODY itself (Shared/HitboxEngine/ProjectileBody) stood at points
 	along the path, close enough to overlap, so a slab reads as a slab and a crescent as a crescent. So a
 	5-shot 30-degree fan shows five evenly spaced lanes because the server fires five evenly spaced lanes.
-	Drawn as fired "Facing" from the root with no homing: an anchor-aimed or target-aimed volley, and a
-	homing shot's turn, depend on a pose and a target this view does not have.
+	Drawn as fired "Facing" from the root with no homing: an anchor-aimed or target-aimed volley, one
+	spawned at a target, and a homing shot's turn, depend on a pose and a target this view does not have.
+	EVERY WAVE is drawn (ProjectileMotion.Cast, fixed aim, AlternateSides mirrored), up to MAX_PLOTTED_SHOTS
+	shots, with each shot's weave and its return toward the root as ProjectileMotion.Path flies them -- so a
+	spiral reads as a spiral and two braided shots as a braid.
 
 	Cells are built once and only recoloured when their state CHANGES: a few hundred Frames toggling a
 	transparency is cheap, a few hundred being rebuilt -- or even re-written with the value they already
@@ -82,8 +85,13 @@ local BODY_TOP = 2.5
 -- How much of a projectile's flight the plot draws, in studs -- enough to read a spread, short enough
 -- that the body stays visible beside it.
 local PROJECTILE_REACH = 24
--- Pieces per shot path when something bends it (gravity, acceleration); a straight shot is one.
+-- Pieces per shot path when something bends it (gravity, acceleration); a straight shot is one. A weave
+-- or a return bends it more often, so it takes more.
 local CURVED_PATH_SEGMENTS = 4
+local WINDING_PATH_SEGMENTS = 10
+-- At most this many shots of a cast are drawn -- the first ones fired. Past it the picture is a blur and
+-- the redraw is not.
+local MAX_PLOTTED_SHOTS = 24
 -- Past this many volumes a cell takes fewer depth samples, so a wide volley still redraws at drag speed.
 local MANY_VOLUMES = 24
 local FEW_DEPTH_SAMPLES = 3
@@ -121,17 +129,26 @@ end
 -- A projectile's volley as Capsules along each shot's path (see this file's header).
 local function volleyVolumes(move: MoveTypes.MoveDefinition, spec: MoveTypes.MoveProjectileConfig): { Volume }
 	local volumes: { Volume } = {}
-	local aim = CFrame.new(move.Offset.Position) * move.Offset.Rotation
+	-- Root space: the root is at the origin, so the ground under it is the feet's height (BODY_BOTTOM).
+	local aim = ProjectileMotion.Raise(spec, CFrame.new(move.Offset.Position) * move.Offset.Rotation, BODY_BOTTOM)
+	local winding = spec.WeaveDegrees > 0 or spec.ReturnAfterSeconds > 0
 	local curved = spec.Gravity ~= 0 or spec.Acceleration ~= 0
-	local segments = if curved then CURVED_PATH_SEGMENTS else 1
+	local segments = if winding then WINDING_PATH_SEGMENTS elseif curved then CURVED_PATH_SEGMENTS else 1
+	local shots = ProjectileMotion.Cast(spec, aim, ProjectileMotion.MirrorOffset(aim))
+	if #shots > MAX_PLOTTED_SHOTS then
+		shots = table.move(shots, 1, MAX_PLOTTED_SHOTS, 1, {})
+	end
+	local function pathOf(shot: ProjectileMotion.CastShot, pieces: number): { Vector3 }
+		return ProjectileMotion.Path(spec, shot, PROJECTILE_REACH, pieces, spec.WeaveMirrored and shot.Index % 2 == 0)
+	end
 	local body = ProjectileBody.Of(spec)
 	if not body.IsSphere then
 		-- The body itself, stood along each path. A stand every body-length overlaps its neighbour; the
 		-- path's own bend is honoured by sampling it at least as finely as it curves.
 		local stride = math.max(body.Extents.Z, MIN_BODY_STRIDE)
 		segments = math.clamp(math.ceil(PROJECTILE_REACH / stride), segments, MAX_BODY_STANDS)
-		for _, shot in ProjectileMotion.Volley(spec, aim) do
-			local points = ProjectileMotion.Path(spec, shot, PROJECTILE_REACH, segments)
+		for _, shot in shots do
+			local points = pathOf(shot, segments)
 			for index, point in points do
 				local before, after = points[math.max(index - 1, 1)], points[math.min(index + 1, #points)]
 				local heading = after - before
@@ -146,8 +163,8 @@ local function volleyVolumes(move: MoveTypes.MoveDefinition, spec: MoveTypes.Mov
 		end
 		return volumes
 	end
-	for _, shot in ProjectileMotion.Volley(spec, aim) do
-		local points = ProjectileMotion.Path(spec, shot, PROJECTILE_REACH, segments)
+	for _, shot in shots do
+		local points = pathOf(shot, segments)
 		for index = 1, #points - 1 do
 			local a, b = points[index], points[index + 1]
 			local delta = b - a

@@ -142,37 +142,73 @@ The differences the layers above apply, each one line:
 | DamageSystem | Damage and posture × the shot's `DamageScale` (reflected multipliers). Knockback pushes along the flight. No melee spacing push. |
 | AttackRequestSystem | A shot's contact does not hit-confirm-cancel or keep-the-chain on the thrower's *swing*. Replicates shots on `Attack_Projectile` to the clients within `AttackConstants.Network.ProjectileRelevanceStuds` of their path (`ProjectileRelevance`). |
 
-The Hitbox tab, for a projectile move, is seven sections, in this order (BODY, SPAWN, VOLLEY, FLIGHT,
-then HOMING, COLLISION and PARRY, which start folded):
+The Hitbox tab, for a projectile move, is eleven sections, in this order (BODY, SPAWN, VOLLEY, FLIGHT open;
+WAVES, PATH, HOMING, COLLISION, ON END and PARRY start folded, each saying in its heading what it is set to).
+Every field below appears only while it can take effect, and a hidden value is kept. Expanded 2026-10-26 —
+the reasoning is `docs/architecture/2026-10-26-move-creator-projectile-expansion.md`.
 
 - **BODY** — what flies. *Start from* a weapon preset (Orb, Fireball, Arrow, Spear, Kunai, Shuriken,
   SwordWave, Cutter, Boulder, Log, Wall, Drill, Blade, Tide — each sets only the shape and its size), the
   shape chips (12 body shapes; pointed ones fly point first), the measurements that shape reads (the
   sphere's Radius is the spec's `Size`), and a *Scale* row (×0.5 ×0.8 ×1.25 ×2). What is drawn is exactly
   what hits.
-- **VOLLEY** — Pattern (Single / Fan / Row / Column / Ring), Count, Spread angle (Fan/Ring) or Spacing
-  (Row/Column).
-- **FLIGHT** — Speed, Lifetime, Max range, Gravity (studs/s², negative floats), Acceleration along the heading.
+- **SPAWN** — Anchor, **Measured from** (`The anchor`, or `At the target`: the offset stood at the target —
+  right/up/forward along the line from you to it, so *Up 25* drops a shot from above; no target in range
+  falls back to the anchor), the Offset (its Up is the *anchor's* up, so it tilts with a hand or weapon), **Spawn height** (studs straight up in the world, −20 to 100) and *Height measured from* (`The spawn point`, or `The ground` under it), **Fires** (`Body facing`, `Anchor facing`, `At target`), *Lead the
+  target* (aim where it will be), and Yaw/Pitch/Roll, which aim the volley (roll turns a fan's plane).
+  *Place in world* places the spawn.
+- **VOLLEY** — a second *Start from* row of **behaviour recipes** (Bolt, Shotgun, Gatling, Seekers, Lances,
+  Spiral, Halo, Serpents, Boomerang, ClusterBomb, SkyStrike, Mine): each writes every behaviour field —
+  volley, waves, flight, path, homing, collision, end effects — over the defaults, and keeps the body and the
+  parry answers. A recipe is copied in; editing it later changes no move. Then Pattern (Single / Fan / Row /
+  Column / Cone / Grid / Circle), Count, Spread angle (Fan/Cone), Spacing (Row/Column/Grid), Columns (Grid),
+  Formation radius (Circle's ring; for Fan/Cone, how far out along its own heading each shot starts — a 360°
+  fan with a radius is a ring of emitters firing outward), and *Converge at* (every shot re-aimed through one
+  point that far ahead).
+- **WAVES** — Waves, Between waves, Between shots (stagger inside a wave), Turn per wave (a Circle or Cone
+  with a turn is a spiral), Aim (`Follow thrower` re-aims every wave; `Fixed aim` keeps the first), and
+  *Alternate sides* (every second wave from the other hand, or the offset mirrored). A stun, a parry or
+  death stops the waves not yet fired; a swing that finishes fires them all. One cast is one parry group.
+- **FLIGHT** — Speed, Lifetime, Max range, Range measured (`Along path` / `Straight line` from the spawn),
+  Gravity (studs/s², negative floats), Acceleration along the heading, Min and Max speed.
+- **PATH** — Weave (degrees either side, frequency, side-to-side or up-and-down, *mirror every second shot*
+  so a pair braids) and **Return after** (a boomerang: turns for home at *Return turn*, may hit again on the
+  way back, ends in your hand; its range restarts for the way back).
 - **HOMING** — Homing + strength (degrees/s of turn), max homing angle, homing range, target selection
-  (`Closest to heading`, `Nearest`). Range/angle/selection also pick the target for `Fires: At target`.
-  Targets are the engine's registered combatants — players, bots, dummies — never the thrower.
+  (`Closest to heading`, `Nearest`), *Homing delay* (flies straight first) and *Homing duration*.
+  Range/angle/selection also pick the target for `Fires: At target` and `Measured from: At the target`.
+  Targets are the engine's registered combatants — players, bots, dummies — never the thrower, and always
+  chosen by the server.
 - **COLLISION** — On walls: `Destroy` / `Bounce off` (× Max bounces) / `Pass through`. Piercing + Max
-  pierces is the separate question of **bodies**: off, the first target ends the shot; on, it passes through
-  Max pierces targets and the next ends it. Each target is hit once per shot. *Can hit its thrower* (never in
-  the first 0.25 s).
-- **SPAWN** — Anchor and Offset (the spawn point), **Fires** (`Body facing`, `Anchor facing`, or
-  `At target`), and Yaw/Pitch/Roll, which aim the volley (roll turns a fan's plane — a fan rolled 90° is
-  vertical). *Place in world* places the spawn; Resize sets its size.
-- **PARRY** — Parry behavior: `Parry one` (the shot parried), `Parry all` (every shot of the same volley
-  still flying — every shot carries its own id and the volley's shared group id), `Cannot be parried`
+  pierces is the separate question of **bodies**; *Re-hit after* lets a piercing shot strike the same body
+  again after that long (each strike spends a pierce; 0 = once). *Can hit its thrower* (never in the first
+  0.25 s). *Proximity fuse* ends the shot when a body it could hit comes that close. *Damage at max range*
+  + *Falloff starts at*: linear damage falloff by distance flown.
+- **ON END** — *Burst* (`Never` / `Impact` = a body, a wall or the fuse / `Expire` = range or lifetime /
+  `Always`), radius and damage (× the shot's): every body inside is struck once, except the ones the shot
+  already hit, and a burst cannot be parried (a parry reads as a guard). *Split* on the same triggers into
+  N shots (Fan or Cone, angle, speed ×), for up to 3 *Generations*; children carry on away from where the
+  parent ended (off the surface, for a wall) and never re-hit what it hit. *Which shots burst* (`Every shot`
+  / `Split only` — a cluster bomb / `Original only`). A parried or returned shot neither bursts nor splits;
+  an evaded one flies on as if it had never touched. The **Presentation** tab's *Bursts* moment is the
+  burst's look and sound.
+- **PARRY** — Parry behavior: `Parry one` (the shot parried), `Parry all` (every shot of the same cast
+  still flying — every shot carries its own id and the cast's shared group id), `Cannot be parried`
   (blocked instead). When parried: `Existing parry` (shot ends, thrower staggered exactly as a parried
   swing), `Destroy`, `Reflect` (the parrier owns it; direction back at the thrower / where the parrier faces
   / mirrored off the guard; × reflected damage and speed), `Reverse direction` (the parrier owns it and it
-  retraces its path).
+  retraces its path, straight — no homing, no weave).
+
+**Budget.** One cast may put at most 128 shots in the air counting every wave and every split generation
+at its fullest, over at most 6 s of waves; Save refuses one past either (`ProjectileOverBudget`,
+`ProjectileCastTooLong`) and says which numbers to lower. The readout's notes list settings that save but
+cannot take effect as set (a converge on shots that share one origin, a return after the lifetime, a re-hit
+on a shot that does not pierce, waves that outlast the swing).
 
 Spread, worked: 5 shots in a 30° `Fan` fly at −15°, −7.5°, 0°, 7.5°, 15° — evenly, never random; a 360°
-fan is a full ring with no doubled shot. The readout's plots draw the volley's paths with the same math
-the server flies (`Shared/HitboxEngine/ProjectileMotion.lua`), as fired `Facing` with no homing.
+fan is a full ring with no doubled shot. The readout's plots draw every wave's paths (up to 24 shots) with the
+same math the server flies (`Shared/HitboxEngine/ProjectileMotion.lua`) — weave and return included — as
+fired `Facing` from the root with no homing and no target.
 
 A projectile move cannot grab (Validate: `ProjectileCannotGrab`), and a weapon stage is always melee. The
 look of a shot in flight is one shared default (`FXConstants.Projectile`, drawn by `Client/FX/ProjectileFX.lua`);

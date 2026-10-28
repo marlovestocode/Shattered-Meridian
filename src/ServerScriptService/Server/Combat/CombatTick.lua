@@ -54,6 +54,7 @@ CombatTick.PHASES = table.freeze({
 	"AirComboSystem",
 	"EngagementSystem",
 	"EnvironmentReactionSystem",
+	"RagdollSystem", -- limp bodies: settle polls and get-ups (its takes happen in DamageSystem's OnApplied)
 	"DomainSystem", -- reads what every layer above wrote this frame
 })
 

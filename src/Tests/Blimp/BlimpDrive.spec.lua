@@ -13,6 +13,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
 
 local BlimpDrive = require(ServerScriptService.Server.Blimp.BlimpDrive)
+local VesselDriveMath = require(ServerScriptService.Server.Vessel.VesselDriveMath)
 local BlimpConstants = require(ReplicatedStorage.Shared.Blimp.BlimpConstants)
 local BlimpTypes = require(ReplicatedStorage.Shared.Blimp.BlimpTypes)
 
@@ -352,7 +353,7 @@ return function()
 		-- it as one enormous corrective velocity. See BlimpSystem.onHeartbeatTick for the one call site.
 		it("passes a target back unchanged when it is within the bound", function()
 			local target = CFrame.new(10, 100, 0)
-			local clamped = BlimpDrive.ClampLead(target, Vector3.new(0, 100, 0), 50)
+			local clamped = VesselDriveMath.ClampLead(target, Vector3.new(0, 100, 0), 50)
 			-- Same value, not merely an equal one -- the caller uses this identity to decide whether it
 			-- has anything to write back into Drive at all.
 			expect(clamped).to.equal(target)
@@ -360,14 +361,14 @@ return function()
 
 		it("passes a target back unchanged exactly at the bound", function()
 			local target = CFrame.new(50, 100, 0)
-			local clamped = BlimpDrive.ClampLead(target, Vector3.new(0, 100, 0), 50)
+			local clamped = VesselDriveMath.ClampLead(target, Vector3.new(0, 100, 0), 50)
 			expect(clamped).to.equal(target)
 		end)
 
 		it("pulls an over-extended target back to exactly the bound, along the same line", function()
 			-- A hull blocked for a while: Target has raced 400 studs down +X while the root never moved.
 			local target = CFrame.new(400, 100, 0)
-			local clamped = BlimpDrive.ClampLead(target, Vector3.new(0, 100, 0), 50)
+			local clamped = VesselDriveMath.ClampLead(target, Vector3.new(0, 100, 0), 50)
 			expect(clamped.Position.X).to.be.near(50, 1e-4)
 			expect(math.abs(clamped.Position.Y - 100) < 1e-4).to.equal(true)
 			expect(math.abs(clamped.Position.Z) < 1e-4).to.equal(true)
@@ -376,13 +377,13 @@ return function()
 		it("clamps distance in any direction, not just along a world axis", function()
 			local actual = Vector3.new(10, 100, -5)
 			local target = CFrame.new(actual + Vector3.new(30, 40, 0)) -- 50 studs away
-			local clamped = BlimpDrive.ClampLead(target, actual, 25)
+			local clamped = VesselDriveMath.ClampLead(target, actual, 25)
 			expect(math.abs((clamped.Position - actual).Magnitude - 25) < 1e-3).to.equal(true)
 		end)
 
 		it("preserves the target's rotation, not just its position", function()
 			local target = CFrame.lookAt(Vector3.new(300, 100, 0), Vector3.new(301, 100, 1))
-			local clamped = BlimpDrive.ClampLead(target, Vector3.new(0, 100, 0), 50)
+			local clamped = VesselDriveMath.ClampLead(target, Vector3.new(0, 100, 0), 50)
 			expect((clamped.LookVector - target.LookVector).Magnitude < 1e-4).to.equal(true)
 		end)
 
@@ -396,7 +397,7 @@ return function()
 			-- the wrong axis regardless of whether the clamp actually worked.
 			local facingX = CFrame.lookAt(Vector3.new(0, 100, 0), Vector3.new(1, 100, 0))
 			local racedAhead = run(BlimpDrive.NewState(facingX), intentOf(1, 0, 0), config, 5)
-			local clampedTarget = BlimpDrive.ClampLead(racedAhead.Target, Vector3.new(0, 100, 0), 20)
+			local clampedTarget = VesselDriveMath.ClampLead(racedAhead.Target, Vector3.new(0, 100, 0), 20)
 			local reseeded = {
 				Target = clampedTarget,
 				Speed = racedAhead.Speed,

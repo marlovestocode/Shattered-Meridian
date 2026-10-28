@@ -87,6 +87,7 @@ local VesselTypes = require(ReplicatedStorage.Shared.Vessel.VesselTypes)
 
 local Analog = require(script.Parent.Parent.Input.Analog)
 local KeybindManager = require(script.Parent.Parent.Input.KeybindManager)
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local logger = Logger.scope("BoatController")
 
@@ -299,7 +300,7 @@ local function refreshPoseBinding(): ()
 	if wanted then
 		-- Character + 1, not Heartbeat -- see this file's header. This is the whole reason the pose
 		-- survives a playing idle animation instead of fighting it.
-		RunService:BindToRenderStep(RENDER_STEP_NAME, Enum.RenderPriority.Character.Value + 1, applyPoses)
+		RunService:BindToRenderStep(RENDER_STEP_NAME, FrameOrder.Priority("BoatPose"), applyPoses)
 	else
 		RunService:UnbindFromRenderStep(RENDER_STEP_NAME)
 	end
@@ -422,26 +423,6 @@ local function pumpSailHold(deltaTime: number): ()
 	sendSailShift(sailHeld)
 end
 
--- Whether `input` is the press that reaches `binding` on EITHER device -- the contextual counterpart of
--- KeybindManager.Matches, and the only thing in this file that knows a control has two columns.
---
--- BOTH COLUMNS ARE CHECKED UNCONDITIONALLY, with no read of which device is "current". Same reasoning as
--- readHelmAxis summing rather than branching: an InputObject already carries which physical input it
--- was, so a device check here could only ever disagree with the press in hand. The keyboard and gamepad
--- columns hold disjoint KeyCodes, so checking both is not ambiguous, merely thorough.
-local function matchesControl(binding: VesselTypes.HelmPressBinding, input: InputObject): boolean
-	if input.KeyCode == binding.Gamepad then
-		return true
-	end
-	local keyboard = binding.Keyboard
-	if keyboard then
-		return input.KeyCode == keyboard
-	end
-	-- The Release row, whose keyboard half is the live Interact bind rather than a fixed key.
-	local action = binding.Action
-	return action ~= nil and KeybindManager.Matches(action, input)
-end
-
 local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 	-- BUTTONA IS EXEMPTED FROM THE gameProcessed GATE, and this is a Roblox engine quirk rather than a
 	-- BoatConstants reasoning error -- the identical carve-out Client/Blimp/BlimpController.onInputBegan
@@ -461,7 +442,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		return
 	end
 
-	if matchesControl(BoatConstants.Controls.Release, input) then
+	if KeybindManager.MatchesHelmControl(BoatConstants.Controls.Release, input) then
 		local remote = dismountRemote
 		if not remote then
 			logger:warn("Release pressed before the dismount remote was ready")
@@ -477,11 +458,11 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		return
 	end
 
-	if matchesControl(BoatConstants.Controls.SailUp, input) then
+	if KeybindManager.MatchesHelmControl(BoatConstants.Controls.SailUp, input) then
 		beginSailHold(1)
-	elseif matchesControl(BoatConstants.Controls.SailDown, input) then
+	elseif KeybindManager.MatchesHelmControl(BoatConstants.Controls.SailDown, input) then
 		beginSailHold(-1)
-	elseif matchesControl(BoatConstants.Controls.Furl, input) then
+	elseif KeybindManager.MatchesHelmControl(BoatConstants.Controls.Furl, input) then
 		-- The panic key. Takes every sail off her from wherever the rung was, rather than making a
 		-- skipper tap S past three rungs while the ship carries on toward whatever they just noticed.
 		--
@@ -490,7 +471,7 @@ local function onInputBegan(input: InputObject, gameProcessed: boolean): ()
 		-- they just took it off.
 		sailHeld = 0
 		sendSailShift(0)
-	elseif matchesControl(BoatConstants.Controls.Adrift, input) then
+	elseif KeybindManager.MatchesHelmControl(BoatConstants.Controls.Adrift, input) then
 		local remote = toggleAdriftRemote
 		if remote then
 			remote:FireServer()
@@ -507,8 +488,8 @@ local function onInputEnded(input: InputObject, _gameProcessed: boolean): ()
 	if sailHeld == 0 then
 		return
 	end
-	local up = sailHeld > 0 and matchesControl(BoatConstants.Controls.SailUp, input)
-	local down = sailHeld < 0 and matchesControl(BoatConstants.Controls.SailDown, input)
+	local up = sailHeld > 0 and KeybindManager.MatchesHelmControl(BoatConstants.Controls.SailUp, input)
+	local down = sailHeld < 0 and KeybindManager.MatchesHelmControl(BoatConstants.Controls.SailDown, input)
 	if up or down then
 		sailHeld = 0
 	end

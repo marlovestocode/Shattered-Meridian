@@ -20,8 +20,12 @@
 	Claims are keyed by Humanoid with weak keys, so a life that ends takes its claims with it and a fresh
 	Humanoid starts with none -- the engine's default (jump enabled) is then the right answer.
 
+	The claim bookkeeping is Client/Movement/HumanoidClaims.lua, shared with TurnGate (AutoRotate).
+
 	Does not own: when any owner holds (each owner decides), or the jump's physics (Roblox / parkour).
 ]]
+
+local HumanoidClaims = require(script.Parent.HumanoidClaims)
 
 local JumpGate = {}
 
@@ -37,43 +41,15 @@ JumpGate.Owners = {
 	RealmRoot = "RealmRoot",
 }
 
--- Humanoid -> owner -> true.
-local claims: { [Humanoid]: { [string]: boolean } } = setmetatable({}, { __mode = "k" }) :: any
-
-local function publish(humanoid: Humanoid): ()
-	local held = claims[humanoid]
-	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, held == nil)
-end
+local gate = HumanoidClaims.New(function(humanoid: Humanoid, held: boolean): ()
+	humanoid:SetStateEnabled(Enum.HumanoidStateType.Jumping, not held)
+end)
 
 -- Takes (`held` true) or drops (`held` false) `owner`'s claim. Idempotent, and it re-publishes every call,
 -- so an owner restating its answer also repairs a switch something outside this module flipped.
-function JumpGate.Set(humanoid: Humanoid, owner: string, held: boolean): ()
-	local current = claims[humanoid]
-	if held then
-		if current == nil then
-			current = {}
-			claims[humanoid] = current
-		end
-		current[owner] = true
-	elseif current ~= nil then
-		current[owner] = nil
-		if next(current) == nil then
-			claims[humanoid] = nil
-		end
-	end
-	publish(humanoid)
-end
+JumpGate.Set = gate.Set
 
 -- Whether `owner` (or, with no owner, anybody) is holding this Humanoid's jump down.
-function JumpGate.IsHeld(humanoid: Humanoid, owner: string?): boolean
-	local current = claims[humanoid]
-	if current == nil then
-		return false
-	end
-	if owner == nil then
-		return true
-	end
-	return current[owner] == true
-end
+JumpGate.IsHeld = gate.IsHeld
 
 return JumpGate

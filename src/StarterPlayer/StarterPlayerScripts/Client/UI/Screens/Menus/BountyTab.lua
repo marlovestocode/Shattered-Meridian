@@ -22,10 +22,9 @@
 	Types.BountyBoardEntry, so this file does no reward math at all. A formula that crosses no
 	boundary needs no shared module -- the duplication was deleted rather than relocated.
 
-	Data flow, both halves of which are needed: an initial Bounty_GetActiveBounties invoke on mount
-	(so an opened menu is populated immediately rather than blank until something happens), plus a
-	Bounty_BoardUpdated subscription for every subsequent change. Neither alone is sufficient -- pull
-	only would go stale while open, push only would show nothing until the next kill.
+	Data flow: ClientState.Observe on the Bounty_BoardUpdated slice. ClientState caches the last board and asked the server to
+	re-send it at boot (PlayerState_Replay), so an opened menu shows the current board at once and every later change -- the
+	Bounty_GetActiveBounties pull this used to need for the first half is gone (2026-10-27).
 
 	Does not own: whether the player themselves is marked (ClientState.BountyMarked, which the hotbar
 	badge and the identity rail also read -- see ClientState.lua's header on why that one is shared
@@ -46,7 +45,6 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Fusion = require(ReplicatedStorage.Packages.Fusion)
 local BountyConstants = require(ReplicatedStorage.Shared.BountyConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Types = require(ReplicatedStorage.Shared.Types)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 
@@ -57,7 +55,7 @@ local SectionHeading = require(script.Parent.Parent.Parent.Components.SectionHea
 local StatusTag = require(script.Parent.Parent.Parent.Components.StatusTag)
 local Stack = require(script.Parent.Parent.Parent.Components.Stack)
 local Inset = require(script.Parent.Parent.Parent.Components.Inset)
-local RemoteInvoker = require(script.Parent.Parent.Parent.Parent.Network.RemoteInvoker)
+local ClientState = require(script.Parent.Parent.Parent.State.ClientState)
 
 local Children = Fusion.Children
 
@@ -213,27 +211,13 @@ function BountyTab.Mount(scope: Scope, props: BountyTabProps): Frame
 		entries:set(validated)
 	end
 
-	-- Push: every change from here on.
-	local boardUpdated = NetworkBridge.GetRemoteEvent(BountyConstants.RemoteNames.BoardUpdated)
-	boardUpdated.OnClientEvent:Connect(function(payload: Types.BountyBoardUpdatePayload)
+	-- The cached board now, and every change from here on (ClientState's slice cache).
+	ClientState.Observe(BountyConstants.RemoteNames.BoardUpdated, function(payload: Types.BountyBoardUpdatePayload)
 		if typeof(payload) ~= "table" then
 			logger:warn("Malformed Bounty_BoardUpdated payload ignored", { payload = tostring(payload) })
 			return
 		end
 		applyEntries(payload.Entries)
-	end)
-
-	-- Pull: the current board, once, so an opened menu isn't blank until the next kill. Wrapped in
-	-- pcall and spawned off the mount path -- a RemoteFunction invoke yields and can throw if the
-	-- server drops it, and neither is a reason for the whole UI mount to fail.
-	task.spawn(function()
-		local getActive = NetworkBridge.GetRemoteFunction(BountyConstants.RemoteNames.GetActiveBounties)
-		local ok, result = RemoteInvoker.Invoke(getActive)
-		if not ok then
-			logger:warn("Initial bounty board fetch failed", { error = tostring(result) })
-			return
-		end
-		applyEntries(result)
 	end)
 
 	local rows = scope:ForPairs(entries, function(_use, innerScope, index, entry: Types.BountyBoardEntry)

@@ -30,6 +30,7 @@
 ]]
 
 local RunService = game:GetService("RunService")
+local FrameOrder = require(script.Parent.Parent.Config.FrameOrder)
 
 local TransformLayer = {}
 
@@ -61,7 +62,7 @@ local function ensureFrameCounter(): ()
 	frameBound = true
 	-- pcall: RenderStep does not exist outside a client (the spec harness), where AdvanceFrame drives it.
 	pcall(function()
-		RunService:BindToRenderStep(FRAME_BINDING, Enum.RenderPriority.First.Value, function()
+		RunService:BindToRenderStep(FRAME_BINDING, FrameOrder.Priority("TransformLayer"), function()
 			frame += 1
 		end)
 	end)
@@ -122,6 +123,32 @@ function TransformLayer.Restore(motor: Motor6D): ()
 		motor.Transform = record.Base
 	end
 	records[motor] = nil
+end
+
+-- The R6 joints the body pose layers (GuardStrainPose, HitFlinchPose) compose onto, as found on `humanoid`'s model:
+-- nil when it has none of them (a non-R6 rig). Here, beside the layer, because both pose modules once carried their
+-- own byte-identical copy of the list and the lookup.
+local BODY_JOINTS: { { Name: string, Holder: string } } = {
+	{ Name = "RootJoint", Holder = "HumanoidRootPart" },
+	{ Name = "Neck", Holder = "Torso" },
+	{ Name = "Right Shoulder", Holder = "Torso" },
+	{ Name = "Left Shoulder", Holder = "Torso" },
+}
+
+function TransformLayer.ResolveBodyJoints(humanoid: Humanoid): { Motor6D }?
+	local model = humanoid.Parent
+	if model == nil then
+		return nil
+	end
+	local joints: { Motor6D } = {}
+	for _, spec in BODY_JOINTS do
+		local holder = model:FindFirstChild(spec.Holder)
+		local motor = if holder then holder:FindFirstChild(spec.Name) else nil
+		if motor and motor:IsA("Motor6D") then
+			table.insert(joints, motor)
+		end
+	end
+	return if #joints > 0 then joints else nil
 end
 
 return TransformLayer

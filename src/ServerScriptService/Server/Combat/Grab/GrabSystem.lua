@@ -69,6 +69,12 @@
 	the flight until landing (playVictimThrowClip, dropFlight). Until then it is still a hold in every respect
 	CanAttack/IsHolding/IsHeld can see; only HoldSeconds stops applying.
 
+	A THROW IS ANNOUNCED (2026-10-27): OnThrown fires the frame the body leaves the hand, with the grabbing
+	move's id, so a sibling can act on the thrown body without this module knowing what it does. RagdollSystem
+	is the one listener: a grab move that carries a Ragdoll block puts the body limp on the throw. The flight
+	carries on as before (landing probes, impact and landing damage); restoreControl then leaves a body that
+	is Ragdolled (BodyRestraint) to the ragdoll, and a Ragdolled body is never grabbed.
+
 	THE RELEASE ORDER (restoreControl) IS VesselMount.Release's, and for its reason: settle the body's
 	velocity, then hand ownership back, THEN wake the Humanoid. A separated assembly inherits the velocity
 	the attacker's had (a turning attacker's spin included); clearing PlatformStand before zeroing that
@@ -137,6 +143,8 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local AnimationManager = require(ReplicatedStorage.Shared.Animation.AnimationManager)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
+local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local DamageTypes = require(ReplicatedStorage.Shared.Damage.DamageTypes)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local GrabConstants = require(ReplicatedStorage.Shared.Grab.GrabConstants)
@@ -145,7 +153,6 @@ local GrabTypes = require(ReplicatedStorage.Shared.Grab.GrabTypes)
 local HitboxEngineConstants = require(ReplicatedStorage.Shared.HitboxEngine.HitboxEngineConstants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
@@ -153,6 +160,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local DamageSystem = require(script.Parent.Parent.Damage.DamageSystem)
 local RootControl = require(script.Parent.Parent.RootControl)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
@@ -185,6 +193,10 @@ type Hold = {
 	AttackerRoot: BasePart,
 	Config: MoveGrabConfig,
 	Mode: ModeSpec,
+	-- The move that grabbed, and the kind of hit it landed as -- carried to OnThrown so a listener can read the
+	-- move's other blocks (its Ragdoll) without this module knowing they exist.
+	MoveId: string,
+	Kind: string,
 	ExpiresAt: number,
 	Weld: Weld,
 	Body: BodySnapshot,
@@ -227,6 +239,22 @@ type Flight = {
 	VictimAnimator: AnimationManagerInstance?,
 }
 
+-- What OnThrown tells a listener about a throw, the frame the body leaves the hand.
+export type ThrowReport = {
+	Attacker: Model,
+	Victim: Model,
+	-- The grabbing move, and the kind of hit (Clean / Backstab / GuardBroken) the grab landed as.
+	MoveId: string,
+	Kind: string,
+	-- The flat direction thrown in, and the velocity the body was just given.
+	Direction: Vector3,
+	Velocity: Vector3,
+}
+
+-- OnThrown's subscribers (Shared/CallbackList.lua). Fired after the flight is recorded and the launch written,
+-- so a listener that takes the body (RagdollSystem) overrides the launch, and this module's landing sees it.
+local thrownListeners: CallbackList.CallbackList<ThrowReport> = CallbackList.New(logger, "GrabSystem.OnThrown")
+
 local holds: { [Model]: Hold } = {}
 -- Reverse index, victim -> attacker, kept ONLY for the duration of a hold (not a flight -- a thrown
 -- victim is tracked in `flights` instead, see Throw below) -- what makes GrabSystem.CanAttack an O(1)
@@ -237,7 +265,6 @@ local flights: { [Model]: Flight } = {}
 local started = false
 local heartbeatTrove = Trove.New()
 local appliedDisconnect: (() -> ())? = nil
-local throwRemote: RemoteEvent? = nil
 local holdChangedRemote: RemoteEvent? = nil
 local throwRateLimiter = RateLimiter.New(GrabConstants.Network.MaxThrowsPerSecondPerPlayer)
 
@@ -416,8 +443,13 @@ end
 -- Hands a victim back their own body -- shared by a dropped hold, a landed throw, and the disconnect
 -- sweep. In VesselMount.Release's order, for its reason (this file's header, THE RELEASE ORDER):
 -- settle, then ownership, then the Humanoid.
+--
+-- A body the ragdoll has taken (a throw from a move with a Ragdoll block -- OnThrown) is left exactly as it is:
+-- its velocity, ownership and PlatformStand are the ragdoll's now, and it hands them back when the body is up.
+-- Only this module's own Attribute and claim come off.
 local function restoreControl(victim: Model, humanoid: Humanoid, root: BasePart): ()
-	if root.Parent ~= nil then
+	local ragdolled = humanoid.Parent ~= nil and BodyRestraint.Has(humanoid, "Ragdolled")
+	if root.Parent ~= nil and not ragdolled then
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
 		-- To the victim's own player explicitly, or to the server for a bot/dummy (nil) -- never Auto;
@@ -429,7 +461,9 @@ local function restoreControl(victim: Model, humanoid: Humanoid, root: BasePart)
 		end)
 	end
 	if humanoid.Parent ~= nil then
-		humanoid.PlatformStand = false
+		if not ragdolled then
+			humanoid.PlatformStand = false
+		end
 		humanoid:SetAttribute(AttributeConstants.Grabbed, nil)
 	end
 	-- The victim's claim only (Server/Combat/RootControl.lua): a stagger or an air combo holding the same body
@@ -529,7 +563,14 @@ end
 -- not a bug in the hit that triggered it, the ordinary Clean/Backstab/GuardBroken damage/posture/
 -- hitstun already resolved by DamageResolver still applies regardless of whether this side effect
 -- fires.
-local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig, now: number): ()
+local function beginHold(
+	attacker: Model,
+	victim: Model,
+	config: MoveGrabConfig,
+	moveId: string,
+	kind: string,
+	now: number
+): ()
 	if attacker == victim then
 		return
 	end
@@ -560,6 +601,10 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 	-- Read as an Attribute, not through a BlimpSystem require, the same seam AttackRequestSystem's and
 	-- DefenseSystem's own Mounted gates use.
 	if victimHumanoid:GetAttribute(AttributeConstants.Mounted) == true then
+		return
+	end
+	-- A limp body is the ragdoll's (Server/Combat/Ragdoll/RagdollSystem): a weld into it would be a second owner.
+	if BodyRestraint.Has(victimHumanoid, "Ragdolled") then
 		return
 	end
 	-- Either side of a live air combo: AirComboSystem is already driving that body server-side, and a
@@ -634,6 +679,8 @@ local function beginHold(attacker: Model, victim: Model, config: MoveGrabConfig,
 		AttackerRoot = attackerRoot,
 		Config = config,
 		Mode = mode,
+		MoveId = moveId,
+		Kind = kind,
 		ExpiresAt = now + config.HoldSeconds,
 		Weld = weld,
 		Body = body,
@@ -734,8 +781,8 @@ local function launch(attackerModel: Model, hold: Hold, now: number): ()
 	-- The separated assembly inherited the attacker's velocity, turning included; none of that is part
 	-- of the throw.
 	victimRoot.AssemblyAngularVelocity = Vector3.zero
-	victimRoot.AssemblyLinearVelocity = forward * config.ThrowHorizontalVelocity
-		+ Vector3.new(0, config.ThrowUpVelocity, 0)
+	local velocity = forward * config.ThrowHorizontalVelocity + Vector3.new(0, config.ThrowUpVelocity, 0)
+	victimRoot.AssemblyLinearVelocity = velocity
 	-- Deliberately NO sendHoldChanged for the victim here: AttributeConstants.Grabbed spans the whole
 	-- hold-then-flight lifetime (see this file's header), and so does the "GRABBED" client cue it
 	-- drives -- the victim's own Active=false fires once, on landing, not twice.
@@ -751,6 +798,15 @@ local function launch(attackerModel: Model, hold: Hold, now: number): ()
 		StalledSince = nil,
 		VictimAnimator = victimAnimator,
 	}
+
+	thrownListeners:Fire({
+		Attacker = attackerModel,
+		Victim = hold.Victim,
+		MoveId = hold.MoveId,
+		Kind = hold.Kind,
+		Direction = forward,
+		Velocity = velocity,
+	})
 
 	debugLog(
 		GrabConstants.Debug.LogHoldReleased,
@@ -1107,6 +1163,13 @@ function GrabSystem.IsInFlight(model: Model): boolean
 	return flights[model] ~= nil
 end
 
+-- Tells `callback` about every throw, the frame the body leaves the hand (ThrowReport). Returns the disconnect.
+-- The extension point for a sibling that does something to a thrown body -- RagdollSystem, when the grabbing
+-- move carries a Ragdoll block. The flight (landing, impact damage) carries on regardless.
+function GrabSystem.OnThrown(callback: (ThrowReport) -> ()): () -> ()
+	return thrownListeners:Connect(callback)
+end
+
 -- Lifecycle ----------------------------------------------------------------------------------------
 
 local function onDamageApplied(outcome: DefenseOutcome, result: DamageResult): ()
@@ -1114,7 +1177,7 @@ local function onDamageApplied(outcome: DefenseOutcome, result: DamageResult): (
 	if not config then
 		return
 	end
-	beginHold(outcome.Attacker, outcome.Defender, config, outcome.SampleTime)
+	beginHold(outcome.Attacker, outcome.Defender, config, outcome.Report.DebugName, outcome.Kind, outcome.SampleTime)
 end
 
 -- Subscribes to the damage layer's outcome signal, and nothing else. Split out of Init for the same
@@ -1143,25 +1206,30 @@ function GrabSystem.Init(): ()
 	-- time) before the first grab rather than on it.
 	ensureCollisionGroup()
 
-	throwRemote = NetworkBridge.CreateRemoteEvent(GrabConstants.Network.RemoteNames.Throw)
-	throwRemote.OnServerEvent:Connect(function(player: Player)
+	local endpoint = Endpoint.Scope("GrabSystem", logger)
+	endpoint.Event({
+		Name = GrabConstants.Network.RemoteNames.Throw,
 		-- Was the one gameplay remote in this codebase with no limiter -- see
 		-- GrabConstants.Network.MaxThrowsPerSecondPerPlayer's own comment. Safe to just drop rather than
 		-- buffer: a dropped Throw leaves the hold intact and its own ExpiresAt safety timer still
 		-- releases it, unlike a "stop"/release action RateLimiter.lua's own header warns against gating.
-		if throwRateLimiter:IsLimited(player) then
-			return
-		end
-		local character = player.Character
-		if not character then
-			return
-		end
-		local accepted, reason = GrabSystem.Throw(character, os.clock())
-		if not accepted then
-			debugLog(GrabConstants.Debug.LogRefused, "Grab throw refused", { player = player.Name, reason = reason })
-		end
-	end)
-	holdChangedRemote = NetworkBridge.CreateRemoteEvent(GrabConstants.Network.RemoteNames.HoldChanged)
+		Limiter = throwRateLimiter,
+		Handler = function(player: Player)
+			local character = player.Character
+			if not character then
+				return
+			end
+			local accepted, reason = GrabSystem.Throw(character, os.clock())
+			if not accepted then
+				debugLog(
+					GrabConstants.Debug.LogRefused,
+					"Grab throw refused",
+					{ player = player.Name, reason = reason }
+				)
+			end
+		end,
+	})
+	holdChangedRemote = endpoint.Push(GrabConstants.Network.RemoteNames.HoldChanged)
 
 	GrabSystem.Attach()
 
@@ -1219,6 +1287,7 @@ function GrabSystem.Reset(): ()
 		appliedDisconnect()
 		appliedDisconnect = nil
 	end
+	thrownListeners:Clear()
 	table.clear(holds)
 	table.clear(heldBy)
 	table.clear(flights)

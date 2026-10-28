@@ -20,7 +20,7 @@
 	WHICH MOVE A MoveId MEANS: a custom move over a Default one -- AttackCatalog's own lookup order, so the
 	catalogue describes the move combat would actually throw.
 
-	HOW IT HEARS ABOUT EDITS: MoveRegistryManager.OnChanged and DefaultMoveRegistry.OnChanged, which fire
+	HOW IT HEARS ABOUT EDITS: MoveContent.OnChanged (MoveRegistryManager.OnChanged and DefaultMoveRegistry.OnChanged fanned in), which fire
 	from the registries' own write functions -- so a Preview, a Save, a Delete, a Reset, a version restore,
 	a bulk scale and the boot-time source/DataStore hydration all reach it through one seam, whichever
 	System did the writing. Boot order does not matter: Init rebuilds from both registries, and anything
@@ -41,8 +41,7 @@ local MovePresentationTypes = require(ReplicatedStorage.Shared.Combat.MovePresen
 local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 
-local DefaultMoveRegistry = require(script.Parent.DefaultMoveRegistry)
-local MoveRegistryManager = require(script.Parent.MoveRegistryManager)
+local MoveContent = require(script.Parent.MoveContent)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
 
 type Presentation = MovePresentationTypes.Presentation
@@ -68,7 +67,7 @@ local initialized = false
 
 -- The block combat's own lookup order would find for `moveId`, or nil.
 local function effectivePresentation(moveId: string): Presentation?
-	local move = MoveRegistryManager.Get(moveId) or DefaultMoveRegistry.Get(moveId)
+	local move = MoveContent.Get(moveId)
 	return if move then move.Presentation else nil
 end
 
@@ -158,16 +157,9 @@ local function rebuild(): ()
 	table.clear(published)
 	table.clear(digests)
 	table.clear(pending)
-	local seen: { [string]: boolean } = {}
-	for _, move in MoveRegistryManager.List() do
-		seen[move.MoveId] = true
+	-- Each id from the layer that wins it (MoveContent: Custom over Default).
+	for _, move in MoveContent.List() do
 		if move.Presentation then
-			published[move.MoveId] = move.Presentation
-			digests[move.MoveId] = digestOf(move.Presentation)
-		end
-	end
-	for _, move in DefaultMoveRegistry.List() do
-		if not seen[move.MoveId] and move.Presentation then
 			published[move.MoveId] = move.Presentation
 			digests[move.MoveId] = digestOf(move.Presentation)
 		end
@@ -188,8 +180,7 @@ function MovePresentationSystem.Init(): ()
 	end)
 
 	rebuild()
-	table.insert(unsubscribes, MoveRegistryManager.OnChanged(markChanged))
-	table.insert(unsubscribes, DefaultMoveRegistry.OnChanged(markChanged))
+	table.insert(unsubscribes, MoveContent.OnChanged(markChanged))
 	logger:info("MovePresentationSystem initialized")
 end
 

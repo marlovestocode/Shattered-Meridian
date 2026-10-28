@@ -239,7 +239,7 @@ end
 -- fires on cached geometry the character is no longer walking into.
 --
 -- The second is on FACING, and it is a genuinely independent question rather than a stricter version
--- of the first. Under shift lock (Client/Camera/ShiftLockCamera.lua) WASD is camera-relative with
+-- of the first. Under shift lock (Client/Camera/CombatCamera.lua) WASD is camera-relative with
 -- AutoRotate off, so travel and facing are decoupled: holding S walks the character backward into
 -- whatever is behind them while the camera -- and therefore the character's facing -- still points
 -- the other way entirely. The travel check alone passes that, because the body genuinely IS closing

@@ -41,8 +41,8 @@ local GATED_WHILE_MOUNTED: { [string]: string } = {
 	Leap = "ParkourInput",
 	-- Client/Emotes/EmoteWheelClient.lua -- refuses to open the wheel while mounted.
 	EmoteWheel = "EmoteWheelClient",
-	-- Client/Camera/ShiftLockCamera.lua -- reads the same Attribute and yields the camera slot.
-	ShiftLock = "ShiftLockCamera",
+	-- Client/Camera/CombatCamera.lua -- reads the same Attribute and yields the camera slot.
+	ShiftLock = "CombatCamera",
 }
 
 return function()

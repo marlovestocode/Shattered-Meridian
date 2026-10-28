@@ -42,6 +42,7 @@ local Logger = require(ReplicatedStorage.Shared.Logger)
 local DevMenuModule = require(script.DevMenu)
 local MoveEditorModule = require(script.MoveEditor)
 local KitEditorModule = require(script.KitEditor)
+local WorldArchitectModule = require(script.WorldArchitect)
 local LiveConsoleModule = require(script.LiveConsole)
 local StorybookModule = require(script.Storybook)
 
@@ -63,6 +64,8 @@ export type DevToolScreens = {
 	-- Server/Managers/BloodlineManager.lua) -- the one screen here whose absence is felt by
 	-- gameplay rather than only by tooling, since nothing else can populate those registries.
 	KitEditor: Lazy.Lazy<KitEditorModule.KitEditorHandle>,
+	-- The World Architect's docked console (admin world construction).
+	WorldArchitect: Lazy.Lazy<WorldArchitectModule.WorldArchitectHandle>,
 	LiveConsole: Lazy.Lazy<LiveConsoleModule.LiveConsoleHandle>,
 	Storybook: Lazy.Lazy<StorybookModule.StorybookHandle>,
 }
@@ -86,6 +89,12 @@ function DevToolScreens.Mount(scope: Scope, playerGui: PlayerGui): DevToolScreen
 		KitEditor = Lazy.new("KitEditor", function()
 			local handle = KitEditorModule.Mount(scope, playerGui)
 			logger:debug("KitEditor mounted (deferred until authorized)")
+			return handle
+		end),
+
+		WorldArchitect = Lazy.new("WorldArchitect", function()
+			local handle = WorldArchitectModule.Mount(scope, playerGui)
+			logger:debug("WorldArchitect mounted (deferred until authorized)")
 			return handle
 		end),
 

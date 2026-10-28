@@ -52,6 +52,7 @@ local Types = require(ReplicatedStorage.Shared.Types)
 local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 
 local SuspicionLedger = require(script.Parent.Support.SuspicionLedger)
 local Endpoint = require(script.Parent.Parent.Network.Endpoint)
@@ -93,7 +94,7 @@ type PlayerParkourState = {
 	LastPerKind: { [string]: number },
 }
 
-local playerStates: { [Player]: PlayerParkourState } = {}
+local playerStates: { [Player]: PlayerParkourState } = PlayerScoped.New("ParkourSystem.playerStates")
 
 -- Rejections per player, counted and flagged ONCE per session through the shared SuspicionLedger (2026-10-08) --
 -- the window and latch this System used to keep on each player's state, now shared with KnockbackAudit and
@@ -171,15 +172,20 @@ local KNOCKBACK_DISTORTABLE: { [RejectionReason]: boolean } = {
 	ImplausibleTravel = true,
 }
 
+-- Whether the server has stamped this body as legitimately displaced right now (Attributes.KnockbackUntil,
+-- written only through Server/Combat/MovementAllowance on a launch, a realm's pull or a teleport).
+local function knockbackAllowed(humanoid: Humanoid, now: number): boolean
+	local allowance = humanoid:GetAttribute(AttributeConstants.KnockbackUntil)
+	return typeof(allowance) == "number" and now <= allowance
+end
+
 local function noteRejection(player: Player, _state: PlayerParkourState, reason: RejectionReason, now: number): ()
-	-- Inside a knockback allowance (Attributes.KnockbackUntil, stamped by DamageSystem on every launch it
-	-- hands this player), a speed/travel rejection is still a rejection -- nothing is granted -- but it
-	-- is not EVIDENCE: the combat layer moved this body, not the client. Counting it would flag the
+	-- Inside a knockback allowance, a speed/travel rejection is still a rejection -- nothing is granted --
+	-- but it is not EVIDENCE: the combat layer moved this body, not the client. Counting it would flag the
 	-- players who get hit hardest. Knockback compliance has its own detector (KnockbackAudit).
 	if KNOCKBACK_DISTORTABLE[reason] then
 		local _, humanoid = CharacterUtil.LiveRig(player)
-		local allowance = if humanoid then humanoid:GetAttribute(AttributeConstants.KnockbackUntil) else nil
-		if typeof(allowance) == "number" and now <= allowance then
+		if humanoid and knockbackAllowed(humanoid, now) then
 			return
 		end
 	end
@@ -363,7 +369,14 @@ local function handleReport(player: Player, rawPayload: unknown): ()
 		-- Read BEFORE endAction clears it. An End earns its momentum carry only if it is closing a
 		-- window this same kind actually opened -- see endAction's own header.
 		local hadOpenWindow = state.OpenKind == report.Kind and state.OpenStartedAt ~= nil
-		endAction(player, state, report.Speed, now, hadOpenWindow)
+		-- ...and only if the action ended on its own terms. An End arriving while something else holds the
+		-- body (the stagger that cut the slide) or inside a knockback allowance closes the window but earns
+		-- nothing: the speed it reports, and the speed the server observes, is the HIT's, and carrying it as
+		-- a WalkSpeed floor would hand a player who was just launched a burst of run speed the moment the
+		-- hold released. These Ends used to be refused outright, which stranded WalkSpeed instead.
+		local displaced = humanoid ~= nil
+			and (ParkourOwnership.HeldElsewhere(humanoid, DomainRules.ServerNow()) or knockbackAllowed(humanoid, now))
+		endAction(player, state, report.Speed, now, hadOpenWindow and not displaced)
 	end
 end
 
@@ -437,9 +450,7 @@ function ParkourSystem.Init(): ()
 			getState(player)
 		end,
 		OnPlayerRemoving = function(player: Player)
-			playerStates[player] = nil
 			rejections:Release(player)
-			rateLimiter:Clear(player)
 		end,
 		OnCharacter = function(player: Player)
 			onCharacterAdded(player)

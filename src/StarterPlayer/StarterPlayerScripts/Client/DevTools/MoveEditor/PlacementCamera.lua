@@ -22,7 +22,7 @@
 	camera, so a camera that moved during the drag would feed its own motion back into the drag and send
 	the volume running away.
 
-	COORDINATION, NOT A FIGHT. ShiftLockCamera is the canonical writer of MouseBehavior and the body's yaw;
+	COORDINATION, NOT A FIGHT. CombatCamera is the canonical writer of MouseBehavior and the body's yaw;
 	this suspends it through its own keyed SetInputSuspended rather than overwriting it, so it neither
 	re-locks the cursor nor turns the character toward the orbiting camera (which would swing a
 	root-anchored hitbox around with it). The camera itself is written at RenderPriority.Last + 2, after
@@ -32,6 +32,11 @@
 	(the gizmo is Handles).
 
 	The orbit arithmetic is pure and exported (AnglesFrom / Frame) for Tests/MoveEditor/PlacementPreview.spec.
+
+	SHARED WITH THE WORLD ARCHITECT (2026-10-28). Its editor needs exactly this camera over a much larger space, so
+	Start takes an optional Options table -- the owner name (the render step and the CombatCamera suspension key, so the
+	two editors never collide) and the zoom limit -- rather than a second editor camera being written. Without options
+	every number is the Move Editor's, unchanged.
 ]]
 
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -41,7 +46,8 @@ local Workspace = game:GetService("Workspace")
 
 local Trove = require(ReplicatedStorage.Shared.Trove)
 
-local ShiftLockCamera = require(script.Parent.Parent.Parent.Camera.ShiftLockCamera)
+local CombatCamera = require(script.Parent.Parent.Parent.Camera.CombatCamera)
+local FrameOrder = require(script.Parent.Parent.Parent.Config.FrameOrder)
 
 local PlacementCamera = {}
 
@@ -88,6 +94,10 @@ export type Session = {
 	SetKey: (keyCode: Enum.KeyCode, down: boolean) -> (),
 	-- Re-centres on whatever the focus provider says now.
 	Refocus: () -> (),
+	-- The point the camera orbits right now.
+	Focus: () -> Vector3,
+	-- Re-centres on a given point, keeping the view angle.
+	FocusOn: (point: Vector3) -> (),
 }
 
 local PAN_KEYS: { [Enum.KeyCode]: Vector3 } = {
@@ -100,19 +110,31 @@ local PAN_KEYS: { [Enum.KeyCode]: Vector3 } = {
 }
 PlacementCamera.PanKeys = PAN_KEYS
 
+export type Options = {
+	-- Names the render step and the CombatCamera suspension; defaults to the Move Editor's.
+	Owner: string?,
+	-- The furthest the camera may zoom out; defaults to DistanceLimits.Max.
+	MaxDistance: number?,
+}
+
 -- Takes the camera, orbiting whatever `focusOf()` returns at the start (and on each Refocus).
-function PlacementCamera.Start(focusOf: () -> Vector3?): Session
+function PlacementCamera.Start(focusOf: () -> Vector3?, options: Options?): Session
 	local camera = Workspace.CurrentCamera
 	local trove = Trove.New()
 	local previousType = camera.CameraType
+	local stepName = if options and options.Owner then `{options.Owner}Camera` else STEP_NAME
+	local suspendOwner = if options and options.Owner then options.Owner else SUSPEND_OWNER
+	local maxDistance = if options and options.MaxDistance
+		then options.MaxDistance
+		else PlacementCamera.DistanceLimits.Max
 
 	local focus = focusOf() or camera.Focus.Position
 	local yaw, pitch, distance = PlacementCamera.AnglesFrom(camera.CFrame, focus)
 	local held: { [Enum.KeyCode]: boolean } = {}
 
-	ShiftLockCamera.SetInputSuspended(SUSPEND_OWNER, true)
+	CombatCamera.SetInputSuspended(suspendOwner, true)
 	trove:Add(function()
-		ShiftLockCamera.SetInputSuspended(SUSPEND_OWNER, false)
+		CombatCamera.SetInputSuspended(suspendOwner, false)
 	end)
 	camera.CameraType = Enum.CameraType.Scriptable
 	trove:Add(function()
@@ -124,14 +146,11 @@ function PlacementCamera.Start(focusOf: () -> Vector3?): Session
 		if gameProcessed or input.UserInputType ~= Enum.UserInputType.MouseWheel then
 			return
 		end
-		distance = math.clamp(
-			distance * (1 - ZOOM_STEP * input.Position.Z),
-			PlacementCamera.DistanceLimits.Min,
-			PlacementCamera.DistanceLimits.Max
-		)
+		distance =
+			math.clamp(distance * (1 - ZOOM_STEP * input.Position.Z), PlacementCamera.DistanceLimits.Min, maxDistance)
 	end)
 
-	RunService:BindToRenderStep(STEP_NAME, Enum.RenderPriority.Last.Value + 2, function(deltaTime: number)
+	RunService:BindToRenderStep(stepName, FrameOrder.Priority("PlacementCamera"), function(deltaTime: number)
 		local orbiting = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
 		local panning = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton3)
 		-- Locked only while dragging the view: the rest of the time the cursor is for the handles.
@@ -168,7 +187,7 @@ function PlacementCamera.Start(focusOf: () -> Vector3?): Session
 		camera.Focus = CFrame.new(focus)
 	end)
 	trove:Add(function()
-		RunService:UnbindFromRenderStep(STEP_NAME)
+		RunService:UnbindFromRenderStep(stepName)
 	end)
 
 	return {
@@ -185,6 +204,12 @@ function PlacementCamera.Start(focusOf: () -> Vector3?): Session
 			if target then
 				focus = target
 			end
+		end,
+		Focus = function(): Vector3
+			return focus
+		end,
+		FocusOn = function(point: Vector3)
+			focus = point
 		end,
 	}
 end

@@ -47,6 +47,7 @@ local EnvironmentReactionSystem = require(ServerScriptService.Server.Combat.Envi
 local GrabSystem = require(ServerScriptService.Server.Combat.Grab.GrabSystem)
 local HitboxEngine = require(ServerScriptService.Server.Combat.HitboxEngine.HitboxEngine)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
+local RagdollSystem = require(ServerScriptService.Server.Combat.Ragdoll.RagdollSystem)
 local SwingSequencer = require(ServerScriptService.Server.Combat.Attack.SwingSequencer)
 local Rig = require(script.Parent.Rig)
 
@@ -88,6 +89,7 @@ local RESETS: { [string]: () -> () } = {
 	AirComboSystem = AirComboSystem.Reset,
 	EngagementSystem = EngagementSystem.Reset,
 	EnvironmentReactionSystem = EnvironmentReactionSystem.Reset,
+	RagdollSystem = RagdollSystem.Reset,
 	DomainSystem = DomainSystem.Reset,
 }
 

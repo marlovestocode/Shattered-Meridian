@@ -12,10 +12,10 @@
 	still never sends or receives a remote; it only hands each mounted handle to the module that does.
 
 	ShiftLockEngaged: a plain Fusion.Value<boolean> on the root scope, not a Screen's own handle --
-	Client/Camera/ShiftLockCamera.lua writes it on every engage/disengage transition and
+	Client/Camera/CombatCamera.lua writes it on every engage/disengage transition and
 	UI/Components/ShiftLockCrosshair.lua reads it to draw the crosshair. It used to live on the
 	CombatFeedback screen's own handle (Client/UI/Screens/CombatFeedback/init.lua, removed alongside
-	the rest of the combat system) purely because that screen happened to be the thing ShiftLockCamera
+	the rest of the combat system) purely because that screen happened to be the thing CombatCamera
 	was already being handed -- it never had anything to do with combat feedback itself, so it moved
 	here instead of needing a new single-purpose screen just to hold one Value.
 
@@ -118,7 +118,7 @@ type DevToolScreens = {
 
 export type UIHandles = {
 	ClientState: ClientStateModule.ClientState,
-	-- See this file's header -- ShiftLockCamera.lua's own engaged flag, drawn by
+	-- See this file's header -- CombatCamera.lua's own engaged flag, drawn by
 	-- UI/Components/ShiftLockCrosshair.lua.
 	ShiftLockEngaged: Fusion.Value<boolean>,
 	DeathFeed: DeathFeed.DeathFeedHandle,
@@ -259,6 +259,7 @@ function UI.Mount(): UIHandles
 	-- through a second count of this file's own.
 	local chrome = Chrome.New(scope, {
 		ModalOpen = Chrome.ObserveModalGate(scope),
+		WorldVisible = Chrome.ObserveWorldVisible(scope),
 		Dead = deathFeed.Dead,
 	})
 	logger:debug("Chrome mode wired")

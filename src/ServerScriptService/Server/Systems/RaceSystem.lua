@@ -46,7 +46,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Types = require(ReplicatedStorage.Shared.Types)
 local RaceTraitTypes = require(ReplicatedStorage.Shared.Race.RaceTraitTypes)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
 local QiSystem = require(script.Parent.QiSystem)
@@ -63,7 +63,7 @@ local RaceSystem = {}
 -- RaceSystem itself" (this plan's own phrasing), a genuinely separate concept from EffectSystem's own
 -- Timed-modifier expiry: a cooldown gates the NEXT UseAbility call, it grants nothing and has no
 -- Spec of its own.
-local cooldowns: { [Player]: { [string]: number } } = {}
+local cooldowns: { [Player]: { [string]: number } } = PlayerScoped.New("RaceSystem.cooldowns")
 
 local function isOnCooldown(player: Player, traitId: string): boolean
 	local playerCooldowns = cooldowns[player]
@@ -217,10 +217,6 @@ local function onTierChanged(player: Player): ()
 	recomputeBoundEffects(player)
 end
 
-local function onPlayerRemoving(player: Player): ()
-	cooldowns[player] = nil
-end
-
 function RaceSystem.Init(): ()
 	cooldowns = {}
 
@@ -228,7 +224,6 @@ function RaceSystem.Init(): ()
 	GameplayEvents.OnTierChanged(function(player: Player, _newTier: number, _previousTier: number)
 		onTierChanged(player)
 	end)
-	PlayerLifecycle.BindAllPlayers({ Scope = "RaceSystem", OnPlayerRemoving = onPlayerRemoving })
 
 	-- Defensive pass for a profile that loaded before this Init() ran -- same reasoning QiSystem.
 	-- Init()/ArtSystem.Init()/TierSystem.Init() each document for their own GetPlayers() loops.

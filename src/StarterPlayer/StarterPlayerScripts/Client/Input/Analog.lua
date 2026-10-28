@@ -52,6 +52,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local UserInputService = game:GetService("UserInputService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Types = require(ReplicatedStorage.Shared.Types)
+local SettingsStore = require(script.Parent.Parent.Settings.SettingsStore)
 
 export type AnalogConfig = {
 	Deadzone: number,
@@ -88,8 +89,8 @@ local currentSettings: Types.GamepadSettings = {
 	Vibration = Constants.Settings.Gamepad.Defaults.Vibration,
 }
 
--- Called by Client/Settings/SettingsClient.lua once at boot with the player's persisted block, and
--- again on every Controller-tab change. Stores a COPY: the caller's table is its own live state and
+-- Fed by the player's Gamepad settings group (Client/Settings/SettingsStore, subscribed at the bottom of this file): once with the
+-- persisted block, and again on every Controller-tab change. Stores a COPY: the caller's table is its own live state and
 -- must not become shared mutable state here.
 function Analog.SetSettings(settings: Types.GamepadSettings): ()
 	currentSettings = {
@@ -217,5 +218,8 @@ function Analog.IsButtonDown(keyCode: Enum.KeyCode): boolean
 	end
 	return false
 end
+
+-- At require time: the store hands the current block at once, and Analog has no Start of its own.
+SettingsStore.Observe("Gamepad", Analog.SetSettings)
 
 return Analog

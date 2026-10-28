@@ -43,6 +43,7 @@ local Chrome = require(script.Parent.UI.Shell.Chrome)
 local DevMenuClient = require(script.DevMenu.DevMenuClient)
 local MoveEditorClient = require(script.MoveEditor.MoveEditorClient)
 local KitEditorClient = require(script.KitEditor.KitEditorClient)
+local WorldArchitectClient = require(script.WorldArchitect.WorldArchitectClient)
 local LiveConsoleClient = require(script.LiveConsole.LiveConsoleClient)
 local StorybookClient = require(script.Storybook.StorybookClient)
 local PingProbe = require(script.PingProbe)
@@ -67,6 +68,11 @@ function DevTools.Start(screens: DevToolScreens.DevToolScreens, chrome: Chrome.C
 	-- authors Race Trait and Bloodline content.
 	logger:debug("KitEditorClient start")
 	KitEditorClient.Start(screens.KitEditor, chrome)
+
+	-- The world-construction tool. Same shape as the Kit Editor: a server authorization round trip first, the key
+	-- bound only for an admin, the screen forced only then.
+	logger:debug("WorldArchitectClient start")
+	WorldArchitectClient.Start(screens.WorldArchitect, chrome)
 
 	-- Unlike the two above, this one binds its input unconditionally rather than behind a
 	-- boot-time authorization answer -- the real gate is server-side, on Subscribe, fired only once

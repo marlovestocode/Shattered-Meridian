@@ -64,6 +64,11 @@
 	    toward its cheater flag, and Server/Combat/Damage/KnockbackAudit.lua checks the client honoured it.
 	The client decides nothing about a knock but WHEN inside its own frame to write it.
 
+	AND WHETHER A HIT RAGDOLLS (2026-10-27), decided, not applied: DamageResult.Ragdoll is resolved here before
+	OnApplied (Shared/Ragdoll/RagdollRules.Resolve over the move's Ragdoll block and the body's anti-lock
+	Attributes), so the launch of a ragdolled body is not handed to its client and Server/Combat/Ragdoll/
+	RagdollSystem -- a sibling on OnApplied, never required from here -- takes the body and throws it.
+
 	READS A REALM'S RULES (2026-09-30), through the Attribute seam and nothing else (Shared/Domain/
 	DomainRules.lua -- this layer never requires the realm runtime, which sits above it). A contact's damage
 	is scaled by its attacker's DamageDealt and its defender's DamageTaken rule, its guard drain by the
@@ -88,6 +93,7 @@ local AirComboAttributes = require(ReplicatedStorage.Shared.AirCombo.AirComboAtt
 local AirComboMoves = require(ReplicatedStorage.Shared.AirCombo.AirComboMoves)
 local AmortizedReclaim = require(ReplicatedStorage.Shared.AmortizedReclaim)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 local CallbackList = require(ReplicatedStorage.Shared.CallbackList)
 local CharacterUtil = require(ReplicatedStorage.Shared.CharacterUtil)
 local CombatPower = require(ReplicatedStorage.Shared.Progression.CombatPower)
@@ -100,9 +106,11 @@ local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local Invulnerability = require(ReplicatedStorage.Shared.Combat.Invulnerability)
 local Knockback = require(ReplicatedStorage.Shared.Damage.Knockback)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
+local MoveTypes = require(ReplicatedStorage.Shared.MoveTypes)
+local RagdollRules = require(ReplicatedStorage.Shared.Ragdoll.RagdollRules)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 
 local ComboEscalation = require(script.Parent.ComboEscalation)
 local DamageResolver = require(script.Parent.DamageResolver)
@@ -111,11 +119,13 @@ local DefenseSystem = require(script.Parent.Parent.Defense.DefenseSystem)
 local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local CombatTick = require(script.Parent.Parent.CombatTick)
 local MovementAllowance = require(script.Parent.Parent.MovementAllowance)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 
 type DefenseOutcome = DefenseTypes.DefenseOutcome
 type DamageResult = DamageTypes.DamageResult
 type HitReport = HitboxTypes.HitReport
 type CombatFeedback = DamageTypes.CombatFeedback
+type MoveRagdoll = MoveTypes.MoveRagdoll
 
 local logger = Logger.scope("DamageSystem")
 
@@ -182,7 +192,7 @@ end
 -- collected here in resolution order and leaves as ONE Combat_Feedback batch when DamageSystem.Step flushes
 -- -- the same Heartbeat the contacts were resolved in (DefenseSystem's pass 2 runs just before it), so no
 -- presentation is later than it was. A multi-target swing used to cost the attacker one remote per body.
-local feedbackOutbox: { [Player]: { CombatFeedback } } = {}
+local feedbackOutbox: { [Player]: { CombatFeedback } } = PlayerScoped.New("DamageSystem.feedbackOutbox")
 
 local function sendFeedback(model: Model, payload: CombatFeedback): ()
 	if not feedbackRemote then
@@ -279,6 +289,43 @@ local function launchFor(outcome: DefenseOutcome, result: DamageResult): Vector3
 		attackerRoot.CFrame.LookVector,
 		authored
 	)
+end
+
+-- Humanoid states a body is off the ground in -- RagdollTypes' "Airborne" trigger. Read from the state rather than
+-- FloorMaterial: the state replicates from a player's own client, and is what the server's copy agrees on.
+local AIRBORNE_STATES: { [Enum.HumanoidStateType]: boolean } = {
+	[Enum.HumanoidStateType.Freefall] = true,
+	[Enum.HumanoidStateType.Jumping] = true,
+	[Enum.HumanoidStateType.FallingDown] = true,
+}
+
+-- The ragdoll this hit puts the defender into, or nil -- DamageResult.Ragdoll's final answer. The decision is
+-- Shared/Ragdoll/RagdollRules.Resolve's (the move's trigger, the death fallback, the anti-lock Attributes); this
+-- only refuses the bodies something else already owns: a grab (the hit IS a grab), an air combo's (held or
+-- launched -- AirComboSystem drives it), one held on a vehicle or frozen by an admin, a self-hit, a corpse.
+-- `result.Damage` is final here (every scale and the air hook have run), so "lethal" is the blow that kills.
+local RAGDOLL_REFUSING_RESTRAINTS: { BodyRestraint.Restraint } = { "Grabbed", "Grabbing", "Mounted", "Frozen" }
+
+local function ragdollFor(outcome: DefenseOutcome, result: DamageResult, defenderHumanoid: Humanoid?): MoveRagdoll?
+	if defenderHumanoid == nil or defenderHumanoid.Health <= 0 or outcome.Defender == outcome.Attacker then
+		return nil
+	end
+	if result.Grab ~= nil or (result.Knockback ~= nil and result.Knockback.StartsAirCombo == true) then
+		return nil
+	end
+	if AirComboAttributes.IsParticipant(defenderHumanoid) then
+		return nil
+	end
+	for _, restraint in RAGDOLL_REFUSING_RESTRAINTS do
+		if BodyRestraint.Has(defenderHumanoid, restraint) then
+			return nil
+		end
+	end
+	return RagdollRules.Resolve(result.Ragdoll, {
+		Kind = outcome.Kind,
+		Lethal = result.Damage > 0 and result.Damage >= defenderHumanoid.Health,
+		Airborne = AIRBORNE_STATES[defenderHumanoid:GetState()] == true,
+	}, defenderHumanoid, os.clock())
 end
 
 -- Applies `launch` to the defender, by whichever machine owns the body. Returns the defending Player
@@ -567,6 +614,9 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 
 	-- Resolved before OnApplied so every subscriber reads it (DamageResult.Launch's own header).
 	result.Launch = launchFor(outcome, result)
+	-- And whether the hit ragdolls -- the final answer, which replaces the authored block (DamageResult.Ragdoll).
+	result.Ragdoll = ragdollFor(outcome, result, defenderHumanoid)
+	local ragdolled = result.Ragdoll ~= nil
 
 	-- FIRED BEFORE THE HEALTH WRITE, and the ordering is the whole point rather than an accident.
 	-- Humanoid:TakeDamage raises Humanoid.Died synchronously when the blow is lethal, so a subscriber
@@ -586,14 +636,21 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 		end
 	end
 
+	-- A ragdolled defender's launch is the ragdoll's to deliver (RagdollSystem throws the server-held body with
+	-- it), so it is neither written here nor handed to the victim's client, and the body gets no spacing push.
 	local launch = result.Launch
-	local launchedPlayer: Player? = if launch then applyLaunch(outcome.Defender, launch, os.clock()) else nil
+	local launchedPlayer: Player? = if launch and not ragdolled
+		then applyLaunch(outcome.Defender, launch, os.clock())
+		else nil
 
 	-- The spacing pushes (DamageConstants.Spacing). Applied through applyLaunch, the same owner split an
 	-- authored knockback uses, and handed to each player's own client on their feedback as Push. Kept OFF
 	-- result.Launch on purpose: Launch is what the knockback audit and the environment reactions read, and
 	-- a spacing nudge is neither of those.
 	local defenderPush, attackerPush = spacingFor(outcome, entry.MoveId, result, launch)
+	if ragdolled then
+		defenderPush = nil
+	end
 	local pushedDefender: Player? = if defenderPush
 		then applyLaunch(outcome.Defender, defenderPush, os.clock())
 		else nil
@@ -624,6 +681,7 @@ local function applyOutcome(outcome: DefenseOutcome): ()
 			then true
 			else nil,
 		Push = if pushedAttacker then attackerPush else nil,
+		Ragdolled = if ragdolled then true else nil,
 	}
 	sendFeedback(outcome.Attacker, feedback)
 	if outcome.Defender ~= outcome.Attacker then
@@ -916,7 +974,8 @@ function DamageSystem.Init(): ()
 	assert(DefenseSystem.CanAttack ~= nil, "DamageSystem.Init() requires DefenseSystem to be available")
 	started = true
 
-	feedbackRemote = NetworkBridge.CreateRemoteEvent(DamageConstants.Network.RemoteNames.Feedback)
+	local endpoint = Endpoint.Scope("DamageSystem", logger)
+	feedbackRemote = endpoint.Push(DamageConstants.Network.RemoteNames.Feedback)
 
 	DamageSystem.Attach()
 

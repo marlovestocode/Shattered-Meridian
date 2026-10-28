@@ -107,9 +107,7 @@ export type DamageResult = {
 	-- Whether this hit escalates the ATTACKER's string. False for anything a defender answered
 	-- successfully -- landing on a raised guard denies escalation credit.
 	AdvancesCombo: boolean,
-	-- Resolved, never applied. This layer decides THAT a hit knocks back and by how much; the physics
-	-- rig that would apply it is the deleted RagdollController's territory and nothing rebuilds it
-	-- here. Carried so the eventual consumer does not have to re-resolve it.
+	-- The authored knockback this hit carries. DamageSystem turns it into Launch below.
 	Knockback: MoveTypes.MoveKnockback?,
 	-- Same "resolved, never applied here" contract as Knockback above -- Server/Combat/Grab/
 	-- GrabSystem.lua is the eventual consumer, subscribing to DamageSystem.OnApplied rather than this
@@ -121,6 +119,13 @@ export type DamageResult = {
 	-- subscriber reads the one launch that was actually applied. Always nil when Grab is set: a grab is
 	-- what happens INSTEAD of ordinary knockback (GrabSystem.lua's header).
 	Launch: Vector3?,
+	-- The ragdoll this hit puts the defender into, or nil. DamageResolver copies the move's authored block in
+	-- the landed branches; DamageSystem then REPLACES it, before OnApplied, with what RagdollRules.Resolve says
+	-- actually happens (the trigger, the death fallback, the anti-lock rules) -- so every subscriber reads the
+	-- final answer, and Server/Combat/Ragdoll/RagdollSystem applies exactly it. When set, the ragdoll owns the
+	-- body: Launch is still resolved (the ragdoll carries it, scaled by KnockbackScale) but is not handed to the
+	-- victim's client, and no spacing push is given.
+	Ragdoll: MoveTypes.MoveRagdoll?,
 }
 
 -- Fired to both participants once per resolved contact. Everything each side needs to present the
@@ -170,6 +175,10 @@ export type CombatFeedback = {
 	-- True when this landed hit was the LAST M1 of its string (nothing follows it to link into -- see
 	-- DamageConstants.Hitstun.LinkBasicString): the cue for the heavier string-ender beat on both clients.
 	StringEnd: boolean?,
+	-- True on both copies when this hit ragdolled the defender (DamageResult.Ragdoll). The defender's client
+	-- starts no movement freeze, launch or push of its own -- the server holds that body -- and either client
+	-- may weigh the hit's presentation by it.
+	Ragdolled: boolean?,
 }
 
 return DamageTypes

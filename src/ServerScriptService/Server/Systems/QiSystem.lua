@@ -45,11 +45,12 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Types = require(ReplicatedStorage.Shared.Types)
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local QiConstants = require(ReplicatedStorage.Shared.QiConstants)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 local PlayerDataSystem = require(script.Parent.PlayerDataSystem)
+local Endpoint = require(script.Parent.Parent.Network.Endpoint)
+local PlayerStateSystem = require(script.Parent.PlayerStateSystem)
 
 local logger = Logger.scope("QiSystem")
 
@@ -67,7 +68,7 @@ type QiState = {
 	lastSyncAt: number,
 }
 
-local qiStates: { [Player]: QiState } = {}
+local qiStates: { [Player]: QiState } = PlayerScoped.New("QiSystem.qiStates")
 local qiUpdatedRemote: RemoteEvent? = nil
 
 -- Pure formula, exported specifically so this System's regression tests can exercise the actual Qi
@@ -269,17 +270,20 @@ local function onProfileLoaded(player: Player): ()
 	logger:debug("Qi state seeded", { player = player.Name, max = max, regenPerSecond = regenPerSecond })
 end
 
-local function onPlayerRemoving(player: Player): ()
-	qiStates[player] = nil
-end
-
 function QiSystem.Init(): ()
+	-- The pool as it is now, for a client that was not listening yet (PlayerStateSystem's header).
+	PlayerStateSystem.Register("Qi", function(player: Player)
+		local state = qiStates[player]
+		if state then
+			sendQiUpdate(player, state, os.clock())
+		end
+	end)
 	qiStates = {}
 
-	qiUpdatedRemote = NetworkBridge.CreateRemoteEvent(Constants.Qi.RemoteNames.QiUpdated)
+	local endpoint = Endpoint.Scope("QiSystem", logger)
+	qiUpdatedRemote = endpoint.Push(Constants.Qi.RemoteNames.QiUpdated)
 
 	PlayerDataSystem.OnProfileLoaded.Event:Connect(onProfileLoaded)
-	PlayerLifecycle.BindAllPlayers({ Scope = "QiSystem", OnPlayerRemoving = onPlayerRemoving })
 
 	-- Defensive pass for any profile that already finished loading before this Init() ran -- same
 	-- reasoning as PlayerDataSystem.Init()'s own GetPlayers() loop (Studio Team Create / a slow

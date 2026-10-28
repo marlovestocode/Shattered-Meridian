@@ -26,6 +26,8 @@
 	stay with their own domain -- this file's entries point at them, never the other way round.
 ]]
 
+local DebugKeys = require(script.Parent.Input.DebugKeys)
+
 -- Studio-only diagnostics config for Logger.lua -- NOT gameplay logic, NOT a balance/tunable
 -- table like Constants.Combat below, and read by nothing except that one module. See Logger.lua's
 -- header for the exact production-safety contract: a log only ever prints when
@@ -202,10 +204,12 @@ local DebugConstants = {
 			-- Shared/EngineLogCapture.lua's own lifecycle lines (connected/seeded from LogService).
 			EngineLogCapture = true,
 			-- Camera/FX (client).
-			ShiftLockCamera = true,
+			CombatCamera = true,
 			FlightCamera = true,
 			CameraShake = true,
 			CameraOffsetComposer = true,
+			CameraRotationComposer = true,
+			CameraMotion = true,
 			FOVOffset = true,
 			HitStop = true,
 			MovementVFX = true,
@@ -250,7 +254,8 @@ local DebugConstants = {
 			AirComboClient = true,
 			AirComboFX = true,
 			AirComboSystem = true,
-			AttackTrail = true,
+			SwingTrail = true,
+			SwingTrailAnchor = true,
 			AuthoredMoveLibrary = true,
 			BlimpCamera = true,
 			BlimpController = true,
@@ -392,12 +397,10 @@ local DebugConstants = {
 		-- ParkourConstants.Debug.ToggleKeyCode's F6 overlay makes, for the same reason: an authoring tool
 		-- that never opens for a player has no business occupying a row in the player-facing rebind list.
 		--
-		-- The cost of a raw bind is that no table checks it for collisions, which is exactly how F5 and
-		-- F6 ended up both firing on one press (see Constants.Keybinds.Defaults.OpenDevConsole's own
-		-- comment). So, checked by hand against BOTH tables at the time of writing: F5 is
-		-- OpenDevConsole, F6 is ParkourConstants.Debug.ToggleKeyCode, F8 is OpenBugReport, and F7 --
-		-- this -- was free in both. A future dev key must check all three places.
-		ToggleKeyCode = Enum.KeyCode.F7,
+		-- The key itself lives in Shared/Input/DebugKeys.lua with every other raw dev key, where
+		-- DebugKeys.Clashes() (asserted by a spec) checks it against the others and Constants.Keybinds --
+		-- the check this comment used to do by hand, which is how F5 and F6 once fired on one press.
+		ToggleKeyCode = DebugKeys.Storybook,
 	},
 
 	-- The frame-rate overlay (Client/Diagnostics/FpsCounter.lua): a corner readout of FPS and the
@@ -416,10 +419,8 @@ local DebugConstants = {
 		Enabled = true,
 		-- Shown on join; the key toggles it. Set false to have it start hidden.
 		VisibleByDefault = true,
-		-- A RAW key, same call Storybook's F7 makes (see its comment for the collision check): F3 is
-		-- free in Constants.Keybinds and in every raw dev key (F5 console, F6 parkour, F7 storybook,
-		-- F8 bug report).
-		ToggleKeyCode = Enum.KeyCode.F3,
+		-- A RAW key, declared in Shared/Input/DebugKeys.lua (see Storybook's comment for the collision check).
+		ToggleKeyCode = DebugKeys.FpsCounter,
 		-- How often the readout repaints, and the window its FPS and worst frame cover.
 		WindowSeconds = 0.5,
 		-- A frame longer than this is logged (throttled to one line per SpikeLogCooldownSeconds), so a

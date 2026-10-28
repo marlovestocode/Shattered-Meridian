@@ -41,7 +41,9 @@
 	contact after the parry that killed it. It is bounded at one frame, and it is the same bound the
 	engine already accepts elsewhere -- its substep loop deliberately defers a callback-started
 	follow-up swing to the next frame for the same reason. DefenseSystem.spec asserts the bound rather
-	than the absence.
+	than the absence. A STRUCK swinger has no residual (2026-10-27): its later contacts in the batch are
+	dropped by pass 2 (cutByEarlierHit), because "the earlier hit cancels the later swing" is the rule
+	two players trading blows feel directly.
 
 	FRAME ORDER IS LOAD-BEARING. This module's Step must run after HitboxEngine's or pass 2 executes before
 	the substeps that fill its buffer and every batch resolves a frame late. Since 2026-10-08 that order is
@@ -64,17 +66,16 @@ local AirComboConstants = require(ReplicatedStorage.Shared.AirCombo.AirComboCons
 local DefenseConstants = require(ReplicatedStorage.Shared.Defense.DefenseConstants)
 local DefenseTypes = require(ReplicatedStorage.Shared.Defense.DefenseTypes)
 local DomainRules = require(ReplicatedStorage.Shared.Domain.DomainRules)
-local FrozenBody = require(ReplicatedStorage.Shared.Combat.FrozenBody)
 local HitboxTypes = require(ReplicatedStorage.Shared.HitboxEngine.HitboxTypes)
 local ParkourOwnership = require(ReplicatedStorage.Shared.Parkour.ParkourOwnership)
 local Logger = require(ReplicatedStorage.Shared.Logger)
-local NetworkBridge = require(ReplicatedStorage.Shared.NetworkBridge)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
 local ParryWindows = require(ReplicatedStorage.Shared.Defense.ParryWindows)
 local RateLimiter = require(ReplicatedStorage.Shared.RateLimiter)
 local Trove = require(ReplicatedStorage.Shared.Trove)
 local Types = require(ReplicatedStorage.Shared.Types)
 local WeaponDefenseAnimations = require(ReplicatedStorage.Shared.Defense.WeaponDefenseAnimations)
+local BodyRestraint = require(ReplicatedStorage.Shared.Combat.BodyRestraint)
 
 local DefenseStateMachine = require(script.Parent.DefenseStateMachine)
 local GuardMeter = require(script.Parent.GuardMeter)
@@ -83,6 +84,7 @@ local HitboxEngine = require(script.Parent.Parent.HitboxEngine.HitboxEngine)
 local NetworkLatency = require(script.Parent.Parent.NetworkLatency)
 local RootControl = require(script.Parent.Parent.RootControl)
 local CombatTick = require(script.Parent.Parent.CombatTick)
+local Endpoint = require(script.Parent.Parent.Parent.Network.Endpoint)
 
 type DefenseState = DefenseTypes.DefenseState
 type DefenseOutcome = DefenseTypes.DefenseOutcome
@@ -142,6 +144,11 @@ local pending: { PendingContact } = {}
 -- is supposed to be dangerous: one window stops one attack. Kept here rather than by consuming the
 -- machine's own flag in pass 1, so pass 1 genuinely applies nothing.
 local parryConsumedThisBatch: { [Model]: boolean } = {}
+
+-- The earliest SampleTime at which each body took a hit that got through (Clean, Backstab, a guard break) in the
+-- pass 2 now running -- the batch, plus any rewind hold released in it. cutByEarlierHit reads it to drop the
+-- struck body's own later contacts. Cleared at the start of every pass 2.
+local struckThisStep: { [Model]: number } = {}
 
 -- When each body last took a Clean hit (the contact's SampleTime). The close-time clash rule reads it to keep
 -- a defender mid-string from clashing their way out (DefenseConstants.Clash.RecentHitGraceSeconds). Weak, so a
@@ -538,6 +545,12 @@ end
 -- WHY THE GUARD WAITS FOR THE STUN. DamageConstants.Hitstun's own header promises a stunned combatant
 -- "reliably eats at least one more committed attack" -- a promise a guard raised inside the stun
 -- would break for every hit after the first, turning every combo into one hit and a block.
+-- The ground hitstun deadline DamageSystem publishes on this Humanoid (its HitstunUntil Attribute), or nil.
+local function hitstunUntilOf(humanoid: Humanoid): number?
+	local stunnedUntil = humanoid:GetAttribute(AttributeConstants.HitstunUntil)
+	return if typeof(stunnedUntil) == "number" then stunnedUntil else nil
+end
+
 local function bodyCommitted(registration: Registration, now: number): boolean
 	local combatantId = HitboxEngine.GetCombatantId(registration.Model)
 	if combatantId then
@@ -546,8 +559,8 @@ local function bodyCommitted(registration: Registration, now: number): boolean
 			return true
 		end
 	end
-	local stunnedUntil = registration.Humanoid:GetAttribute(AttributeConstants.HitstunUntil)
-	return typeof(stunnedUntil) == "number" and now < stunnedUntil
+	local stunnedUntil = hitstunUntilOf(registration.Humanoid)
+	return stunnedUntil ~= nil and now < stunnedUntil
 end
 
 -- Whether this body is reeling from a GROUND hitstun the stun parry covers (DefenseConstants.StunParry): stunned,
@@ -558,8 +571,8 @@ local function isStunHeld(registration: Registration, now: number): boolean
 	if not config.Enabled or config.WindowScale <= 0 then
 		return false
 	end
-	local stunnedUntil = registration.Humanoid:GetAttribute(AttributeConstants.HitstunUntil)
-	if typeof(stunnedUntil) ~= "number" or now >= stunnedUntil then
+	local stunnedUntil = hitstunUntilOf(registration.Humanoid)
+	if stunnedUntil == nil or now >= stunnedUntil then
 		return false
 	end
 	local combatantId = HitboxEngine.GetCombatantId(registration.Model)
@@ -688,8 +701,8 @@ function DefenseSystem.SetBlocking(model: Model, blocking: boolean, now: number)
 		end
 		-- A frozen body (admin freeze, onboarding isolation) cannot raise a guard or a parry, and the press is
 		-- not held for later either: it would arm the instant the freeze lifted. Press only -- the release above
-		-- still goes through for a guard that was already up. Shared/Combat/FrozenBody.
-		if FrozenBody.IsFrozen(registration.Humanoid) then
+		-- still goes through for a guard that was already up. BodyRestraint's "Guard" row.
+		if BodyRestraint.Restrained(registration.Humanoid, "Guard") then
 			return false
 		end
 		-- HELD, NOT REFUSED. A player who presses guard a moment before their swing ends -- or while
@@ -738,28 +751,11 @@ local function evadeBodyRefusal(registration: Registration, now: number): string
 	if bodyCommitted(registration, now) then
 		return "Committed"
 	end
-	local humanoid = registration.Humanoid
-	if
-		humanoid:GetAttribute(AttributeConstants.Grabbed) == true
-		or humanoid:GetAttribute(AttributeConstants.Grabbing) == true
-		or humanoid:GetAttribute(AttributeConstants.Mounted) == true
-	then
-		return "Restrained"
-	end
-	-- A frozen body (admin freeze, onboarding isolation) does not evade; see SetBlocking.
-	if FrozenBody.IsFrozen(humanoid) then
-		return "Frozen"
-	end
-	-- Held in an air combo: the parry is the one way out, never an evade.
-	if isAirHeld(humanoid) then
-		return "AirHeld"
-	end
-	-- A realm that forbids the evade (a NoEvade rule, Shared/Domain/DomainRules.lua): read as an Attribute
-	-- on the defender, like the air combo's own holds above, never through the realm runtime above this layer.
-	if DomainRules.Has(humanoid, "NoEvade") then
-		return "DomainSealed"
-	end
-	return nil
+	-- BodyRestraint's "Evade" row (Shared/Combat/BodyRestraint.lua), in this order: grabbed/grabbing/mounted are
+	-- "Restrained"; a frozen body (admin freeze, onboarding isolation) does not evade; an air-held body's one way out is
+	-- the parry; a realm's NoEvade rule is "DomainSealed" (read through its lease, never through the realm runtime).
+	-- The realm lease is read on the server clock, as DomainRules.Has always did with no `now`.
+	return BodyRestraint.Refusal(registration.Humanoid, "Evade")
 end
 
 -- The earliest moment an evade press from this body could have been made, as far as the body gates with a RECORD
@@ -769,10 +765,9 @@ end
 -- now, which the arriving press has already passed -- the same residual the attack layer's swing lead accepts.
 local function evadeNotBefore(registration: Registration): number
 	local humanoid = registration.Humanoid
-	local stunnedUntil = humanoid:GetAttribute(AttributeConstants.HitstunUntil)
 	local busyUntil = humanoid:GetAttribute(AttributeConstants.CombatBusyUntil)
 	return math.max(
-		if typeof(stunnedUntil) == "number" then stunnedUntil else -math.huge,
+		hitstunUntilOf(humanoid) or -math.huge,
 		if typeof(busyUntil) == "number" then busyUntil else -math.huge
 	)
 end
@@ -812,10 +807,9 @@ end
 -- id the client could have sent, and a verdict echoing it back would be answering nothing.
 local MAX_PRESS_ID = 2 ^ 31
 
+-- Reached only through Endpoint's rateLimiter (see Init). Decodes its own arguments: a malformed press id drops the verdict, not
+-- the press, which one `Args` refusal could not express.
 local function handleSetBlocking(player: Player, rawBlocking: unknown, rawPressId: unknown): ()
-	if rateLimiter:IsLimited(player) then
-		return
-	end
 	if typeof(rawBlocking) ~= "boolean" then
 		return
 	end
@@ -837,9 +831,10 @@ local function handleSetBlocking(player: Player, rawBlocking: unknown, rawPressI
 	end
 	-- Same gate, same reasoning, as AttackRequestSystem's own Mounted refusal: a body welded to a blimp
 	-- station belongs to the vehicle, and a guard raised from one would be a defence the arm pose is
-	-- already overwriting the animation for. Read as an Attribute, not through a BlimpSystem require.
+	-- already overwriting the animation for. Read as an Attribute (BodyRestraint's "GuardRequest" row), not through a
+	-- BlimpSystem require. A player's remote only: a bot's SetBlocking never mounts.
 	local humanoid = CharacterUtil.HumanoidOf(character)
-	if humanoid and humanoid:GetAttribute(AttributeConstants.Mounted) == true then
+	if BodyRestraint.Restrained(humanoid, "GuardRequest") then
 		return
 	end
 	local armed = DefenseSystem.SetBlocking(character, rawBlocking, os.clock())
@@ -1030,6 +1025,13 @@ local function parryStaggerSeconds(perfect: boolean): number
 	return if perfect then DefenseConstants.PerfectParry.StaggerSeconds else DefenseConstants.Stagger.DurationSeconds
 end
 
+-- The pool a clash leaves behind: `current` plus the clash's (negative) `delta`, but never below
+-- DefenseConstants.Clash.GuardFloor, so a clash cannot empty a guard (and the break that follows an empty one).
+-- A pool already under the floor is unchanged.
+function DefenseSystem.ClashGuard(current: number, delta: number): number
+	return math.max(current + delta, math.min(current, DefenseConstants.Clash.GuardFloor))
+end
+
 local function applyContact(contact: PendingContact, now: number): ()
 	local defenderRegistration = registrations[contact.Defender]
 	local kind = contact.Result.Kind
@@ -1054,6 +1056,9 @@ local function applyContact(contact: PendingContact, now: number): ()
 		-- empty whatever regenerated since classification -- it was judged to empty the pool.
 		local spendsGuard = kind == "Blocked" or kind == "GuardBroken" or (kind == "Trade" and contact.Clash == true)
 		local applied = if kind == "GuardBroken" then 0 else guard:Get() + contact.Result.GuardDelta
+		if kind == "Trade" and contact.Clash == true then
+			applied = DefenseSystem.ClashGuard(guard:Get(), contact.Result.GuardDelta)
+		end
 		guard:Set(applied, now, spendsGuard)
 		-- The emitted outcome carries the pool as it actually is now, not as pass 1 predicted it.
 		contact.Result.Guard = guard:Get()
@@ -1100,11 +1105,8 @@ local function applyContact(contact: PendingContact, now: number): ()
 		if contact.ClashChargesAttacker == true then
 			local attackerRegistration = registrations[contact.Attacker]
 			if attackerRegistration then
-				attackerRegistration.Guard:Set(
-					attackerRegistration.Guard:Get() + contact.Result.GuardDelta,
-					now,
-					true
-				)
+				local attackerGuard = attackerRegistration.Guard
+				attackerGuard:Set(DefenseSystem.ClashGuard(attackerGuard:Get(), contact.Result.GuardDelta), now, true)
 			end
 		end
 		-- Each player's client plays its own drawn weapon's clash clip (DefenseConstants.ClashAnimationId).
@@ -1140,6 +1142,10 @@ local function applyContact(contact: PendingContact, now: number): ()
 		-- A hit that actually got through ends the trade for both sides.
 		endRally(contact.Defender)
 		lastCleanHitAt[contact.Defender] = contact.SampleTime
+		local struckAt = struckThisStep[contact.Defender]
+		if struckAt == nil or contact.SampleTime < struckAt then
+			struckThisStep[contact.Defender] = contact.SampleTime
+		end
 	end
 
 	emit({
@@ -1162,6 +1168,52 @@ end
 -- How far back an arriving press from this defender is judged: min(round trip, cap), with the air combo's
 -- longer cap while air-held (see DefenseConstants.Parry.RewindMaxSeconds on why the two differ). Zero for a
 -- bot or a dummy, which has no round trip to rewind.
+-- THE EARLIER HIT WINS (2026-10-27). Whether `contact` comes from a swing a hit had already cut: its attacker took
+-- a hit that got through at an EARLIER SampleTime and is in hitstun at this contact's. That hit's stun cancelled
+-- the swing (DamageSystem's hitstun cancel), so nothing it touched afterwards lands -- the swinger who was struck
+-- first loses the swing completely, with no damage, stun, posture or credit from it. Only two hits found at the
+-- same instant, or a blade already inside the clash window when the first one landed, are a clash instead
+-- (DefenseConstants.Clash, decided before this in ArbitrateClashes; a Trade is never dropped here).
+--
+-- A hit on this attacker still waiting in the REWIND HOLD is released first, as the Clean it was: the hold
+-- waits for a guard or an evade press, and a body whose swing reached Active committed to attacking instead.
+-- Without this, the struck player's later swing landed during the hold and the earlier hit landed after it --
+-- both damaged, the later swing winning a race it lost. Hitstun is read off the Attribute DamageSystem publishes
+-- (the same one isStunHeld reads), so a hit that stuns nothing -- and so cancels nothing -- drops nothing.
+--
+-- A projectile is never dropped: a shot is delivery already in flight, not the thrower's swing.
+local function cutByEarlierHit(contact: PendingContact, now: number): boolean
+	if contact.Report.Projectile ~= nil or contact.Result.Kind == "Trade" then
+		return false
+	end
+	local attacker = contact.Attacker
+	local earlier: { HeldContact } = {}
+	for _, held in heldContacts do
+		if held.Contact.Defender == attacker and held.Contact.SampleTime < contact.SampleTime then
+			table.insert(earlier, held)
+		end
+	end
+	if #earlier > 0 then
+		table.sort(earlier, function(a: HeldContact, b: HeldContact): boolean
+			return a.Contact.SampleTime < b.Contact.SampleTime
+		end)
+		for _, held in earlier do
+			local index = table.find(heldContacts, held)
+			if index then
+				table.remove(heldContacts, index)
+				applyContact(held.Contact, now)
+			end
+		end
+	end
+	local struckAt = struckThisStep[attacker]
+	if struckAt == nil or struckAt >= contact.SampleTime then
+		return false
+	end
+	local humanoid = CharacterUtil.HumanoidOf(attacker)
+	local stunnedUntil = if humanoid then hitstunUntilOf(humanoid) else nil
+	return stunnedUntil ~= nil and stunnedUntil > contact.SampleTime
+end
+
 local function rewindSecondsFor(registration: Registration): number
 	local cap = if isAirHeld(registration.Humanoid)
 		then AirComboConstants.Parry.RewindMaxSeconds
@@ -1461,6 +1513,8 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 		syncGuard(registration, now)
 	end
 
+	table.clear(struckThisStep)
+
 	-- The rewind holds that have run out apply as the Clean they were. First, so a held contact from an
 	-- earlier frame never lands after a newer one.
 	if #heldContacts > 0 then
@@ -1480,6 +1534,10 @@ function DefenseSystem.Step(deltaTime: number, now: number): ()
 	OutcomeResolver.ArbitrateTrades(pending)
 	OutcomeResolver.ArbitrateClashes(pending)
 	for _, contact in pending do
+		if cutByEarlierHit(contact, now) then
+			debugLog("Contact dropped: its swing was cut by an earlier hit", { attacker = contact.Attacker.Name })
+			continue
+		end
 		local hold = rewindHoldFor(contact, now)
 		if hold > 0 then
 			table.insert(heldContacts, { Contact = contact, ReleaseAt = now + hold })
@@ -1680,9 +1738,13 @@ function DefenseSystem.Init(): ()
 	)
 	started = true
 
-	local setBlocking = NetworkBridge.CreateRemoteEvent(DefenseConstants.Network.RemoteNames.SetBlocking)
-	setBlocking.OnServerEvent:Connect(handleSetBlocking)
-	stateChangedRemote = NetworkBridge.CreateRemoteEvent(DefenseConstants.Network.RemoteNames.StateChanged)
+	local endpoint = Endpoint.Scope("DefenseSystem", logger)
+	endpoint.Event({
+		Name = DefenseConstants.Network.RemoteNames.SetBlocking,
+		Limiter = rateLimiter,
+		Handler = handleSetBlocking,
+	})
+	stateChangedRemote = endpoint.Push(DefenseConstants.Network.RemoteNames.StateChanged)
 
 	DefenseSystem.Attach()
 

@@ -19,7 +19,11 @@
 	directly.
 ]]
 
--- Custom shift-lock camera tunables (Client/Camera/ShiftLockCamera.lua) -- combat-philosophy.md's
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+local ParkourConstants = require(ReplicatedStorage.Shared.Parkour.ParkourConstants)
+
+-- Custom shift-lock camera tunables (Client/Camera/CombatCamera.lua) -- combat-philosophy.md's
 -- "Established systems" list names combat camera behavior as bespoke, not default Roblox behavior.
 -- Client-only data living in Constants.lua for the same reason Keybinds above does: static tunable
 -- defaults every client module should agree on, never authoritative state, never crosses
@@ -75,7 +79,8 @@ local CameraConstants = {
 		-- narrower FOV (a focused "picking up speed" read) -- deliberately the opposite sign from
 		-- Flight.FOVMaxDeltaAtBoost's widening convention, since flight and sprint are different
 		-- feelings (soaring vs. sprinting).
-		FOVDelta = -3,
+		-- -2 since 2026-10-27 (was -3): the sprint narrowing still reads, without pinching the view in a fight.
+		FOVDelta = -2,
 		FOVEaseSpeed = 6,
 	},
 	Slide = {
@@ -116,12 +121,14 @@ local CameraConstants = {
 		Enabled = true,
 		-- Natural frequency (rad/s). At 14 the camera reaches the body ~0.25s after it stops. Vertical is
 		-- a touch stiffer so a jump's rise and fall do not read as floaty.
-		HorizontalFrequency = 14,
-		VerticalFrequency = 16,
+		-- Tuned 2026-10-27 (was 14 / 16, lag 1.1 / 0.8): a tighter, shorter trail -- the jerk of a step-in is still
+		-- taken out, but the view no longer visibly lags a body darting about in a fight.
+		HorizontalFrequency = 16,
+		VerticalFrequency = 18,
 		-- Critical: settles as fast as possible without swinging past the body.
 		Damping = 1,
-		MaxHorizontalLagStuds = 1.1,
-		MaxVerticalLagStuds = 0.8,
+		MaxHorizontalLagStuds = 0.8,
+		MaxVerticalLagStuds = 0.6,
 		-- One-frame jumps bigger than this are teleports/respawns: re-seat instead of animating.
 		TeleportStuds = 8,
 		-- Below this camera-to-focus distance the camera is effectively first person, where an offset
@@ -131,6 +138,98 @@ local CameraConstants = {
 		-- How fast the trail is released when the follow stands down (flight, a vessel, first person),
 		-- so handing off never snaps the view by the last trail's worth.
 		ReleaseEaseSpeed = 12,
+	},
+
+	-- The movement-responsive camera (Client/Camera/CameraMotion.lua, arithmetic in Shared/CameraMotionMath.lua): a lean
+	-- into lateral acceleration, a pull-back and a FOV that grow with speed, and a compression on landing, all derived from
+	-- the body's measured velocity. The smoothed Follow above is its sibling and covers the acceleration LAG of the view;
+	-- this covers everything else. It took over the speed FOV, the landing dip and the wall-run tilt's roll from
+	-- Client/Parkour/ParkourCamera, which are no longer there.
+	--
+	-- RESTRAINT IS THE REQUIREMENT (docs/ui-ux-philosophy.md, Critical States): the lean tops out at 3.5 degrees -- the
+	-- wall-run tilt it shares a roll channel with is 9 -- because rotating the horizon under a player is what makes a camera
+	-- sickening, and a fight needs a steady horizon more than a lively one. Each channel is bounded, damped and returns to
+	-- neutral on its own.
+	Motion = {
+		Enabled = true,
+		-- Per-channel multipliers, the reduce-motion knobs: 1 is the shipped feel, 0 silences a channel. The player-facing
+		-- switch is Settings -> Gameplay -> Camera effects (Parkour.CameraEffects), which turns the whole module off.
+		Scale = {
+			Lean = 1,
+			Pull = 1,
+			Fov = 1,
+			Landing = 1,
+		},
+		Sampling = {
+			-- Time constants of about 33 ms and 63 ms: enough to turn the engine's velocity steps into an acceleration
+			-- that does not buzz at 60 fps, little enough that a strafe start is felt on the frame it begins.
+			VelocityFilterRate = 30,
+			AccelFilterRate = 16,
+			MaxStepSeconds = 0.1,
+		},
+		Lean = {
+			-- Tuned down 2026-10-27 (was 3.5 deg, full at 80, damping 0.8): in a fast fight a strafe-start rocked the
+			-- horizon on every exchange. Now a hard turn reads, a sidestep barely does, and it settles without a wobble.
+			MaxDegrees = 2,
+			-- A strafe from a standing sprint or a full reversal is 100-250 studs/s^2; a wide turn at sprint pace is
+			-- about 50. 80 puts a hard turn at nearly full lean and a gentle arc at a visible fraction of it.
+			FullAccel = 110,
+			Deadzone = 0.12,
+			-- Below this planar speed the lean fades out: a body shuffling in place should not rock the horizon.
+			MinSpeed = 10,
+			-- Slightly under critical: the view arrives with a hint of weight and settles in about a fifth of a second.
+			Frequency = 10,
+			Damping = 0.9,
+		},
+		Pull = {
+			-- Starts above walking pace (18) and is full at the speed the old parkour speed FOV was full at.
+			-- Tuned down 2026-10-27 (was 20 -> 1.6 studs): starts above sprint-jog pace and pulls back a stud at most, so
+			-- the opponent does not shrink on screen every time either of you runs.
+			StartSpeed = 24,
+			FullSpeed = 46,
+			MaxStuds = 1,
+			EaseRate = 4,
+		},
+		Fov = {
+			-- Widening above sprint: the same 0..7 degrees over the same band the parkour speed FOV had, so a body at
+			-- sprint pace or below is framed exactly as before. StartSpeed is ParkourConstants.Locomotion.SprintSpeed,
+			-- read there so the two cannot drift.
+			StartSpeed = ParkourConstants.Locomotion.SprintSpeed,
+			FullSpeed = 46,
+			MaxDelta = 7,
+			-- FOVOffset's ease rate for the whole channel (the parkour speed FOV's was 5 as well).
+			EaseSpeed = 5,
+			-- Free fall: widens past the speed an ordinary jump reaches (about 53) and is full at a long drop.
+			FallStartSpeed = 60,
+			FallFullSpeed = 140,
+			FallMaxDelta = 4,
+		},
+		Landing = {
+			-- The landing bands the parkour framework used (a 9-stud fall is soft, 22 hard), as the speed they land at:
+			-- sqrt(2 * 196.2 * height) is 59 and 93, and a drop of 60 studs is 150. An ordinary jump (53) is not felt.
+			MinImpactSpeed = 58,
+			FullImpactSpeed = 150,
+			SoftDipStuds = 0.25,
+			HardDipStuds = 1.2,
+			-- Underdamped: the view compresses, rebounds a little and settles in about a third of a second.
+			Frequency = 13,
+			Damping = 0.55,
+			MaxReboundStuds = 0.3,
+			CooldownSeconds = 0.2,
+			-- Severity (0..1) from which the impact also shakes, and the shake it plays (scaled by severity).
+			ShakeSeverity = 0.4,
+			Shake = { Amplitude = 0.035, Frequency = 22, DurationSeconds = 0.28 },
+		},
+		-- Eases a released slot (a stand-down to flight, a vessel, first person) back to neutral at this rate.
+		ReleaseEaseSpeed = 12,
+		-- Camera-to-focus distance below which the camera is first person and every offset stands down.
+		FirstPersonDistanceThreshold = 2,
+		-- The named slots this feature owns in each composer.
+		Slots = {
+			Offset = "Motion",
+			Fov = "MotionSpeed",
+			Roll = "MotionLean",
+		},
 	},
 }
 

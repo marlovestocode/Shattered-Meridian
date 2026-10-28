@@ -42,6 +42,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local FXConstants = require(ReplicatedStorage.Shared.FXConstants)
 local FXPool = require(script.Parent.FXPool)
+local HighlightBudget = require(script.Parent.HighlightBudget)
 
 local HitFlash = {}
 
@@ -100,7 +101,8 @@ local function evictOldest(): ()
 	end
 end
 
-local function entryFor(model: Model): Entry
+-- nil when the client's Highlight budget is spent (HighlightBudget): that flash is skipped.
+local function entryFor(model: Model): Entry?
 	local existing = entries[model]
 	if existing then
 		return existing
@@ -109,7 +111,10 @@ local function entryFor(model: Model): Entry
 		evictOldest()
 	end
 
-	local highlight = Instance.new("Highlight")
+	local highlight = HighlightBudget.Acquire("HitFlash")
+	if highlight == nil then
+		return nil
+	end
 	highlight.Name = "HitFlash"
 	-- Reads through a crowd or partial occlusion in a group fight -- the backstabs and ganks this cue
 	-- matters most for.
@@ -146,6 +151,9 @@ function HitFlash.Flash(model: Model, color: Color3): ()
 	end
 
 	local entry = entryFor(model)
+	if entry == nil then
+		return
+	end
 	local highlight = entry.Highlight
 	-- The holder can be replaced with the camera; keep the Highlight under the live one.
 	local holder = getHolder()

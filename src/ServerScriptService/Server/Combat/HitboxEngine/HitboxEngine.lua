@@ -368,6 +368,21 @@ local function resolveAttachmentPart(combatant: Combatant, attachment: HitboxTyp
 	return HitboxAnchor.Resolve(combatant.Model, combatant.RootPart, attachment)
 end
 
+-- The other side of an anchor, for a projectile's AlternateSides waves (ProjectileTypes): the other hand
+-- for a hand, the anchor itself for anything with no other side (the offset is mirrored either way).
+local MIRRORED_ANCHOR: { [string]: HitboxTypes.AttachmentPoint } = {
+	RightHand = "LeftHand",
+	LeftHand = "RightHand",
+}
+local function resolveMirrorPart(
+	combatant: Combatant,
+	attachment: HitboxTypes.AttachmentPoint,
+	anchor: BasePart
+): BasePart
+	local other = MIRRORED_ANCHOR[attachment]
+	return if other then resolveAttachmentPart(combatant, other) else anchor
+end
+
 local function setMovementLock(combatant: Combatant, locked: boolean): ()
 	if combatant.HoldsMovementLock == locked then
 		return
@@ -764,7 +779,10 @@ local function beginActiveWindow(combatant: Combatant, swing: Swing): ()
 	-- same as a swing's -- a caster planting their feet to fire is authored exactly the way a heavy is.
 	if definition.Projectile then
 		local anchor = resolveAttachmentPart(combatant, definition.AttachmentPart)
-		ProjectileSimulator.Launch(combatant, anchor, definition, swing.ComboStage, swing.PowerLevel, hookNow)
+		local mirror = if definition.Projectile.AlternateSides
+			then resolveMirrorPart(combatant, definition.AttachmentPart, anchor)
+			else anchor
+		ProjectileSimulator.Launch(combatant, anchor, definition, swing.ComboStage, swing.PowerLevel, hookNow, mirror)
 		if definition.LocksMovement then
 			setMovementLock(combatant, true)
 		elseif definition.LocksWindup then
@@ -852,6 +870,11 @@ end
 local function endSwing(combatant: Combatant, swing: Swing, completed: boolean): ()
 	combatant.ActiveSwing = nil
 	setMovementLock(combatant, false)
+	-- An interrupted cast fires no more of its waves; a completed one fires them all (ProjectileTypes). A
+	-- recovery the thrower cut short to act again (CancelRecovery) was their choice, not an interruption.
+	if not completed and swing.InterruptReason ~= "RecoveryCancel" and swing.Definition.Projectile ~= nil then
+		ProjectileSimulator.CancelPending(combatant.Model)
+	end
 
 	if debugEnabled() and HitboxEngineConstants.Debug.LogSwings then
 		logger:debug("Swing ended", {
@@ -1336,7 +1359,11 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 		end
 	end
 
-	if #engaged == 0 and ProjectileSimulator.LiveCount() == 0 then
+	-- Shots whose end effects were held for the defence layer's verdict resolve first, at the frame's start,
+	-- so a burst's contacts precede every contact this frame's substeps report (ascending SampleTime).
+	ProjectileSimulator.ResolveEndings(now - frameSeconds)
+
+	if #engaged == 0 and not ProjectileSimulator.Busy() then
 		-- Events can still be waiting: a parry reflects or ends a shot from DefenseSystem's Step, after
 		-- this one has run, and those go out with the next frame's batch.
 		ProjectileSimulator.Step(0, now)
@@ -1397,7 +1424,7 @@ function HitboxEngine.Step(deltaTime: number, now: number): ()
 		-- time, so the stream OnHit subscribers see stays in ascending SampleTime.
 		ProjectileSimulator.Step(frameSeconds / substeps, subNow)
 
-		if #engaged == 0 and ProjectileSimulator.LiveCount() == 0 then
+		if #engaged == 0 and not ProjectileSimulator.Busy() then
 			break
 		end
 	end

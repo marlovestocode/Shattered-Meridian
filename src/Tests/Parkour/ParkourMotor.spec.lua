@@ -23,6 +23,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local ParkourMotor = require(StarterPlayer.StarterPlayerScripts.Client.Parkour.ParkourMotor)
 local AttributeConstants = require(ReplicatedStorage.Shared.AttributeConstants)
 local Rig = require(ServerScriptService.Tests.TestHelpers.Rig)
+local TurnGate = require(StarterPlayer.StarterPlayerScripts.Client.Movement.TurnGate)
 
 local ATTACHMENT_NAME = "ParkourAttachment"
 local VELOCITY_DRIVE_NAME = "ParkourVelocityDrive"
@@ -127,20 +128,30 @@ return function()
 			destroyRig(rig)
 		end)
 
-		it("captures and restores AutoRotate rather than assuming it was true", function()
-			-- Shift lock owns AutoRotate while engaged (Client/Camera/ShiftLockCamera.lua writes it
-			-- false); restoring a hardcoded true would silently break shift lock for the rest of the life.
+		it("holds AutoRotate through a TurnGate claim and never undoes another owner's", function()
+			-- Shift lock holds AutoRotate off while engaged; parkour's release must leave that hold standing,
+			-- and must not restore a stale snapshot when shift lock let go mid-traversal.
 			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
-			rig.Humanoid.AutoRotate = false
+			TurnGate.Set(rig.Humanoid, TurnGate.Owners.ShiftLock, true)
 			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
 
 			local command = ParkourMotor.BeginFrame()
 			command.Mode = "Velocity"
 			ParkourMotor.Apply()
+			expect(TurnGate.IsHeld(rig.Humanoid, TurnGate.Owners.Parkour)).to.equal(true)
 			expect(rig.Humanoid.AutoRotate).to.equal(false)
 
 			ParkourMotor.Release()
+			expect(TurnGate.IsHeld(rig.Humanoid, TurnGate.Owners.Parkour)).to.equal(false)
 			expect(rig.Humanoid.AutoRotate).to.equal(false)
+
+			command = ParkourMotor.BeginFrame()
+			command.Mode = "Velocity"
+			ParkourMotor.Apply()
+			TurnGate.Set(rig.Humanoid, TurnGate.Owners.ShiftLock, false)
+			expect(rig.Humanoid.AutoRotate).to.equal(false)
+			ParkourMotor.Release()
+			expect(rig.Humanoid.AutoRotate).to.equal(true)
 
 			destroyRig(rig)
 		end)
@@ -524,38 +535,6 @@ return function()
 
 			expect(ParkourMotor.ApplyExternalImpulse(Vector3.new(40, 0, 0))).to.equal(false)
 			expect(ParkourMotor.ConsumeInterrupt()).to.equal(nil)
-
-			destroyRig(rig)
-		end)
-	end)
-
-	describe("ParkourMotor.IsFacingHeldElsewhere", function()
-		it("reads the AutoRotate the rest of the game left, not the one this module wrote", function()
-			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
-			rig.Humanoid.AutoRotate = true
-			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
-			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(false)
-
-			-- Owning the body writes AutoRotate false itself; that must not read as shift lock.
-			local command = ParkourMotor.BeginFrame()
-			command.Mode = "Velocity"
-			ParkourMotor.Apply()
-			expect(rig.Humanoid.AutoRotate).to.equal(false)
-			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(false)
-
-			destroyRig(rig)
-		end)
-
-		it("says yes when shift lock had AutoRotate off before the body was taken", function()
-			local rig = Rig.Character("ParkourMotorSpecCharacter", Vector3.new(0, 50, 0))
-			rig.Humanoid.AutoRotate = false
-			ParkourMotor.BindCharacter(rig.Model, rig.Humanoid, rig.Root)
-			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(true)
-
-			local command = ParkourMotor.BeginFrame()
-			command.Mode = "Velocity"
-			ParkourMotor.Apply()
-			expect(ParkourMotor.IsFacingHeldElsewhere()).to.equal(true)
 
 			destroyRig(rig)
 		end)

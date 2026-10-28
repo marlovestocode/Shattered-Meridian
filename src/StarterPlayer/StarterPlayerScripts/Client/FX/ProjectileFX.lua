@@ -35,7 +35,9 @@
 	    thrower's own client, since a shake for somebody else's cast would be noise.
 	  * Bounce -- an Update tagged Reason "Bounce" (the simulator tags it; homing re-syncs are untagged).
 	  * WorldImpact -- an End on the world; its default is the ProjectileWorld sparks this module always
-	    played. End -- a shot that ran out of range or lifetime; its default is nothing.
+	    played. End -- a shot that ran out of range or lifetime (or whose proximity fuse tripped without a
+	    burst); its default is nothing. Burst -- an End carrying Burst, in place of either; its default is
+	    the ProjectileBurst sparks, and its camera cues play on the thrower's own client.
 	Audience "Participants" plays a projectile cue only for the thrower and the shot's homing target. A
 	shot that was never drawn (past the pool cap) plays no cue but the world sparks' default. Everything a
 	cue changes is reset on the carrier's release, so a pooled carrier never carries one move's look into
@@ -82,6 +84,8 @@ local CONFIG = FXConstants.Projectile
 local MAX_LOOPING_SHOTS = FXConstants.MovePresentation.MaxLoopingShots
 -- The ImpactSparks preset a shot ending on the world has always burst -- WorldImpact's default.
 local WORLD_SPARKS = "ProjectileWorld"
+-- And the one a burst plays -- Burst's default.
+local BURST_SPARKS = "ProjectileBurst"
 
 -- An event older than this is not flown forward in one go -- a client that stalled for seconds would
 -- otherwise integrate a shot through the world in a single step. The shot simply starts a little behind.
@@ -108,6 +112,9 @@ type Shot = {
 	Position: Vector3,
 	Velocity: Vector3,
 	Motion: ProjectileMotion.Motion,
+	-- The shot's age on the server's clock, as of Position: the weave and homing's window read it
+	-- (ProjectileMotion's header), so the visual curves exactly where the server's shot does.
+	Age: number,
 	Radius: number,
 	-- The volume the shot flies as, when it is not a plain sphere (the launch's Body), and the look
 	-- ProjectileBody.Look gave it: how to place the core so it lies along the flight.
@@ -129,6 +136,10 @@ type Shot = {
 	-- against the reliable one (AttackConstants.Network.RemoteNames.ProjectileSync), so a late one must
 	-- never overwrite a newer launch, bounce or re-sync.
 	LastEventAt: number,
+	-- Whether the world simply destroys this shot (the default), so the visual may stop where it meets the ground
+	-- instead of drawing on until the server's End arrives; and whether it has. See stopAtWorld.
+	StopsAtWorld: boolean,
+	Stopped: boolean,
 }
 
 local shots: { [number]: Shot } = {}
@@ -374,7 +385,8 @@ local function flyForward(shot: Shot, seconds: number): ()
 	while remaining > 1e-4 do
 		local dt = math.min(remaining, CATCH_UP_STEP_SECONDS)
 		shot.Position, shot.Velocity =
-			ProjectileMotion.Integrate(shot.Position, shot.Velocity, shot.Motion, dt, homingPointOf(shot))
+			ProjectileMotion.Integrate(shot.Position, shot.Velocity, shot.Motion, dt, homingPointOf(shot), shot.Age)
+		shot.Age += dt
 		remaining -= dt
 	end
 end
@@ -420,6 +432,7 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 			Position = event.Position,
 			Velocity = event.Velocity,
 			Motion = motion,
+			Age = 0,
 			Radius = event.Radius or 1,
 			Body = nil,
 			Turn = CFrame.identity,
@@ -432,6 +445,8 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 			Looping = false,
 			Glowing = glowingCount < MAX_GLOWING_SHOTS,
 			LastEventAt = -math.huge,
+			StopsAtWorld = event.Walls == nil,
+			Stopped = false,
 		}
 		shots[event.Id] = shot
 		local flightCue = MovePresentation.CueFrom(resolved, "InFlight")
@@ -465,6 +480,7 @@ local function onLaunch(event: WireEvent, age: number, presentation: Presentatio
 	shot.Position = event.Position
 	shot.Velocity = event.Velocity
 	shot.Motion = motion
+	shot.Age = if typeof(event.Age) == "number" then event.Age else 0
 	shot.Radius = event.Radius or shot.Radius
 	if event.Body ~= nil then
 		shot.Body = ProjectileBody.Of(event.Body :: any)
@@ -496,6 +512,7 @@ local function onUpdate(event: WireEvent, age: number, eventAt: number): ()
 		return
 	end
 	shot.LastEventAt = eventAt
+	shot.Stopped = false
 	if event.Reason == "Bounce" then
 		playPointCue(
 			MovePresentation.CueFrom(shot.Presentation, "Bounce"),
@@ -511,6 +528,13 @@ local function onUpdate(event: WireEvent, age: number, eventAt: number): ()
 	shot.Position = event.Position
 	shot.Velocity = event.Velocity
 	shot.Target = event.Target
+	-- A "Return" changes the motion itself (it homes on its thrower now); every other update keeps it.
+	if event.Motion ~= nil then
+		shot.Motion = event.Motion
+	end
+	if typeof(event.Age) == "number" then
+		shot.Age = event.Age
+	end
 	flyForward(shot, age)
 	shot.Correction = drawnBefore - shot.Position
 end
@@ -520,7 +544,27 @@ local function onEnd(event: WireEvent): ()
 	local presentation = if shot then shot.Presentation else nil
 	local participant = shot ~= nil and isParticipant(shot.Owner, shot.Target)
 	local moveId = if shot then shot.MoveId else nil
-	if event.Reason == "World" then
+	if typeof(event.Burst) == "number" then
+		-- It exploded where it ended: the Burst moment, in place of the wall's or the fizzle's -- except that a
+		-- "Hits the world" SOUND the author gave the move still plays when the shot ended on the world. Without
+		-- it a move that bursts on impact (the usual case) could never be heard hitting a wall, however its
+		-- WorldImpact moment was authored. Sound only: the burst brings its own sparks, shake and template.
+		if event.Reason == "World" then
+			local worldCue = MovePresentation.CueFrom(presentation, "WorldImpact")
+			if worldCue and worldCue.SoundId ~= nil and MovePresentation.Reaches(worldCue, participant) then
+				CombatAudio.PlayCue(worldCue, event.Position)
+			end
+		end
+		playPointCue(
+			MovePresentation.CueFrom(presentation, "Burst"),
+			"Burst",
+			event.Position,
+			BURST_SPARKS,
+			participant,
+			shot ~= nil and shot.Owner ~= nil and shot.Owner == localCharacter(),
+			moveId
+		)
+	elseif event.Reason == "World" then
 		playPointCue(
 			MovePresentation.CueFrom(presentation, "WorldImpact"),
 			"WorldImpact",
@@ -530,7 +574,7 @@ local function onEnd(event: WireEvent): ()
 			false,
 			moveId
 		)
-	elseif event.Reason == "Range" or event.Reason == "Expired" then
+	elseif event.Reason == "Range" or event.Reason == "Expired" or event.Reason == "Proximity" then
 		playPointCue(
 			MovePresentation.CueFrom(presentation, "End"),
 			"End",
@@ -569,6 +613,35 @@ local function onBatch(payload: unknown): ()
 	end
 end
 
+-- A shot the world destroys stops being DRAWN where it meets the ground, not when the server's End reaches
+-- us. The server ends it at the surface on its own sweep, but its End is a round trip behind the shot, and a fast
+-- or homing arrow draws on that far past the ground before it lands -- 100 studs/s over a 100 ms trip is ten
+-- studs under the floor. This is presentation only: the End still arrives and plays the impact cues, and an
+-- Update (a bounce, a re-sync) puts the shot back where the server says it is. A body is not the world: a cast
+-- that meets one is ignored (hitting a body is the server's call, and a piercing shot passes through).
+local worldParams = RaycastParams.new()
+worldParams.FilterType = Enum.RaycastFilterType.Exclude
+worldParams.IgnoreWater = true
+
+local function stopAtWorld(shot: Shot, from: Vector3, to: Vector3): ()
+	local segment = to - from
+	if segment.Magnitude < 1e-3 then
+		return
+	end
+	worldParams.FilterDescendantsInstances = { getHolder() }
+	local hit = Workspace:Raycast(from, segment, worldParams)
+	if hit == nil then
+		return
+	end
+	local model = hit.Instance:FindFirstAncestorOfClass("Model")
+	if model ~= nil and model:FindFirstChildOfClass("Humanoid") ~= nil then
+		return
+	end
+	shot.Position = hit.Position
+	shot.Velocity = Vector3.zero
+	shot.Stopped = true
+end
+
 local function step(deltaTime: number): ()
 	local now = os.clock()
 	local decay = if CONFIG.CorrectionSeconds > 0 then math.exp(-deltaTime / CONFIG.CorrectionSeconds) else 0
@@ -577,9 +650,24 @@ local function step(deltaTime: number): ()
 			release(id)
 			continue
 		end
-		shot.Position, shot.Velocity =
-			ProjectileMotion.Integrate(shot.Position, shot.Velocity, shot.Motion, deltaTime, homingPointOf(shot))
+		if shot.Stopped then
+			place(shot)
+			continue
+		end
+		local before = shot.Position
+		shot.Position, shot.Velocity = ProjectileMotion.Integrate(
+			shot.Position,
+			shot.Velocity,
+			shot.Motion,
+			deltaTime,
+			homingPointOf(shot),
+			shot.Age
+		)
+		shot.Age += deltaTime
 		shot.Correction *= decay
+		if shot.StopsAtWorld then
+			stopAtWorld(shot, before, shot.Position)
+		end
 		place(shot)
 	end
 end

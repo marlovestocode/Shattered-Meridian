@@ -61,7 +61,7 @@ local KeybindConstants = {
 		-- LeftControl stands in for shift lock here since LeftShift is already Sprint above. The
 		-- engine's own mouse-lock switch is disabled in default.project.json
 		-- (StarterPlayer.EnableMouseLockOption = false) so only the bespoke camera mode
-		-- (Client/Camera/ShiftLockCamera.lua) responds to it -- two systems toggling on one key press
+		-- (Client/Camera/CombatCamera.lua) responds to it -- two systems toggling on one key press
 		-- would fight over MouseBehavior every frame.
 		ShiftLock = { KeyCode = Enum.KeyCode.LeftControl },
 		DevMenuToggle = { KeyCode = Enum.KeyCode.Equals },
@@ -97,6 +97,10 @@ local KeybindConstants = {
 		-- action" row of the keyboard (DevMenuToggle = Equals, OpenMoveEditor = Minus, this =
 		-- LeftBracket). Admin-only, same authorization contract as OpenMoveEditor above.
 		OpenKitEditor = { KeyCode = Enum.KeyCode.LeftBracket },
+		-- World Architect toggle (Client/DevTools/WorldArchitect/WorldArchitectClient.lua) -- the key beside
+		-- OpenKitEditor's LeftBracket, completing the admin tool row (Equals, Minus, LeftBracket, RightBracket).
+		-- Admin-only, same authorization contract as OpenMoveEditor: the server re-checks every request.
+		OpenWorldArchitect = { KeyCode = Enum.KeyCode.RightBracket },
 		-- Opens the Live Admin Console (Client/DevTools/LiveConsole/LiveConsoleClient.lua,
 		-- Client/UI/Screens/DevTools/LiveConsole/init.lua) for an authorized admin -- a bespoke live log
 		-- stream, not Roblox's own native Developer Console. It used to open the native one via
@@ -113,8 +117,8 @@ local KeybindConstants = {
 		-- And NOT F6, which is where this first went: F6 is already the parkour debug overlay's raw
 		-- toggle (ParkourConstants.Debug.ToggleKeyCode). That binding is not in this table -- it is
 		-- deliberately raw so it never shows up in the player-facing rebind list -- so nothing here
-		-- flagged the collision, and the two handlers simply both fired on the same press. If another
-		-- "developer tooling" key is ever added, check ParkourConstants.Debug as well as this table.
+		-- flagged the collision, and the two handlers simply both fired on the same press. Every raw
+		-- dev key now lives in Shared/Input/DebugKeys.lua, whose Clashes() checks them against this table.
 		--
 		-- This was F7 until it was moved here by request. One caveat that comes with F5 and did not
 		-- come with F7: in Studio, F5 is Studio's own Play/Resume shortcut, so a press that lands on

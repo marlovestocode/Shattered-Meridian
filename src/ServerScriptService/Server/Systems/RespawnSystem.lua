@@ -48,6 +48,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local Constants = require(ReplicatedStorage.Shared.Constants)
 local Logger = require(ReplicatedStorage.Shared.Logger)
 local PlayerLifecycle = require(ReplicatedStorage.Shared.PlayerLifecycle)
+local PlayerScoped = require(ReplicatedStorage.Shared.PlayerScoped)
 local GameplayEvents = require(ServerScriptService.Server.Events.GameplayEvents)
 
 local RespawnSystem = {}
@@ -68,7 +69,7 @@ local Config = Constants.Respawn
 -- The same generation-guard idiom Client/FX/AnimationTrackUtil.lua's FreezeGuard and CombatClient.
 -- lua's jumpSuppressGeneration already use for "a delayed action must not act on a superseded
 -- world" -- rather than a bare task.delay that trusts nothing changed while it slept.
-local respawnGeneration: { [Player]: number } = {}
+local respawnGeneration: { [Player]: number } = PlayerScoped.New("RespawnSystem.respawnGeneration")
 
 local function bumpGeneration(player: Player): number
 	local next = (respawnGeneration[player] or 0) + 1
@@ -128,9 +129,6 @@ function RespawnSystem.Init(): ()
 	-- of the binder rather than a loop each caller remembers to write.
 	PlayerLifecycle.BindAllPlayers({
 		Scope = "RespawnSystem",
-		OnPlayerRemoving = function(player: Player)
-			respawnGeneration[player] = nil
-		end,
 		OnCharacter = function(player: Player)
 			bumpGeneration(player)
 		end,

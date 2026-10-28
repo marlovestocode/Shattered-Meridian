@@ -154,7 +154,8 @@ end
 -- Plausibility validation of an already-parsed report against what the server observes. Returns
 -- true on accept, or false plus the reason.
 --
--- The checks, and why each one earns its place:
+-- The checks, and why each one earns its place. EVERY ONE IS A START CHECK -- an End is always accepted
+-- (see the End branch):
 --   * Position agreement -- the client's claimed position versus where the server actually sees the
 --     character. This is the load-bearing one: every other claim in the report is anchored to a
 --     position, so a report whose position doesn't match the body it belongs to is worthless
@@ -173,19 +174,24 @@ function ParkourValidation.Validate(
 	observed: ObservedState,
 	config: ValidationConfig
 ): (boolean, RejectionReason?)
-	if report.Speed < 0 or report.Speed > config.MaxReportedSpeed then
-		return false, "ImplausibleSpeed"
-	end
-
-	-- The client's own claimed position must match where the server sees the body. Tolerance is the
-	-- distance a legitimately-moving character can cover in the round trip -- generous, since this
-	-- is a sanity check on the report's anchor, not a latency-sensitive hit test.
-	local claimDrift = (report.Position - observed.Position).Magnitude
-	if claimDrift > config.MaxTravelSpeed then
-		return false, "ImplausibleTravel"
-	end
-
 	if report.Phase == "Start" then
+		-- Speed and position are START checks now (2026-10-26). They used to run above the phase split, so an
+		-- End could still be refused -- which the End branch below says must never happen. The case that
+		-- reached it: a knockback landing mid-slide ends the slide carrying the knockback's own planar speed
+		-- (ParkourController.interruptOwner), a big launch reports past MaxReportedSpeed, and the release was
+		-- refused as ImplausibleSpeed. What an End's speed can earn is clamped in ResolveMomentumCarry anyway.
+		if report.Speed < 0 or report.Speed > config.MaxReportedSpeed then
+			return false, "ImplausibleSpeed"
+		end
+
+		-- The client's own claimed position must match where the server sees the body. Tolerance is the
+		-- distance a legitimately-moving character can cover in the round trip -- generous, since this
+		-- is a sanity check on the report's anchor, not a latency-sensitive hit test.
+		local claimDrift = (report.Position - observed.Position).Magnitude
+		if claimDrift > config.MaxTravelSpeed then
+			return false, "ImplausibleTravel"
+		end
+
 		-- THE PER-KIND INTERVAL, and why it lives inside the Start branch rather than above the split.
 		--
 		-- It used to run before the phase test, applying to Starts and Ends alike, and that was a real
